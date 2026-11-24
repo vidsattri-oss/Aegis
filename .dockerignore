@@ -1,0 +1,8 @@
+*
+!containers
+!containers/Dockerfile
+!containers/*.py
+!omni
+!omni/__init__.py
+!omni/contracts.py
+!omni/role_tools.py

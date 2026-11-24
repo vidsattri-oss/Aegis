@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>RittaiHarness</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/app.js"></script>
+  <script defer src="/session.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <a class="brand" href="#workspace"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>RittaiHarness<small>Local workspace</small></span></a>
+      <nav id="navigation"></nav>
+      <div class="sidebar-bottom">
+        <button class="nav-button" id="settings-button" type="button">Provider settings</button>
+        <button class="nav-button" id="extensions-button" type="button">Extensions</button>
+        <div class="engine" id="engine"><i></i><span>Checking Docker</span></div>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><nav id="breadcrumbs" aria-label="Breadcrumb"></nav><span class="local">Local only</span></header>
+      <main id="content" tabindex="-1"><p class="loading">Loading workspace…</p></main>
+    </div>
+  </div>
+  <div id="lead-chat-root"></div>
+  <dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <noscript>Enable JavaScript to use the local RittaiHarness workspace.</noscript>
+</body>
+</html>

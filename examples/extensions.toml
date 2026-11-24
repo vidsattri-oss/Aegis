@@ -1,0 +1,28 @@
+# Use this file with OMNI_EXTENSIONS, or copy it to your workspace as
+# extensions.toml and adjust the Skill paths relative to the new location.
+
+[[skills]]
+path = "skills/lean-code"
+roles = ["architecture", "development", "review"]
+resources = ["references/checklist.md"]
+
+[[mcp]]
+name = "microsoft-learn"
+url = "https://learn.microsoft.com/api/mcp"
+
+# To route tools through Azure AI Gateway, replace the URL above with
+# the published MCP URL and enable the corresponding runtime credential.
+# token_env = "AI_GATEWAY_API_KEY"
+
+[mcp.tools]
+microsoft_docs_search = ["research"]
+microsoft_docs_fetch = ["research"]
+#
+# Stdio servers use a preinstalled executable:
+# [[mcp]]
+# name = "local-docs"
+# command = ["/absolute/path/to/python3", "docs_server.py"]
+# cwd = "/absolute/path/to/server"
+# env = []
+# [mcp.tools]
+# search_docs = ["research", "architecture"]
