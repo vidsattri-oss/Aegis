@@ -319,7 +319,7 @@ function sessionPage(session) {
     const panel = $("#session-panel");
     panel.classList.toggle("map-panel", id === "map");
     panel.setAttribute("aria-labelledby", "tab-" + id);
-    panel.replaceChildren(...[panels[id](state.session)].flat().filter(Boolean));
+    panel.replaceChildren(...[panels[id](state.session)].flat(Infinity).filter(Boolean));
     if (id === "map") { renderLogPanel(); loadTelemetry(); }
   };
   const tabs = node("div", { class: "tabs", role: "tablist", id: "session-tabs", "aria-label": "Session views",

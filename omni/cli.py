@@ -367,7 +367,7 @@ class ChatShell:
         elif command == "/help":
             self.terminal.write("""Enter a request to start a run. With a session selected, plain text asks the Lead.
   /run REQUEST     Start a new run or change the requirements
-  /demo            Start the offline workshop demo
+  /demo            Start the offline Fieldwork demo
   /project NAME    Choose a project for your next run
   /projects        List projects
   /sessions        List recent sessions in the current project

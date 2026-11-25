@@ -466,7 +466,7 @@ function workspacePage() {
     sectionHeading("Projects"),
     projects.length ? node("div", { class: "project-grid" }, projectCards)
       : node("div", { class: "empty" }, node("h3", {}, "Create your first project"),
-        node("p", { class: "muted" }, "Give the Lead Agent a request, or try the built-in workshop task board."),
+        node("p", { class: "muted" }, "Give the Lead Agent a request, or try Fieldwork, the built-in expedition planner."),
         button("Create project", newProject)),
     node("section", { class: "panel" }, sectionHeading("Hive Memory", button("Explore Dreaming", showDreaming, "quiet")),
     node("div", { class: "hive" }, [[memory.nodes, "Knowledge nodes"], [memory.links, "Graph links"],

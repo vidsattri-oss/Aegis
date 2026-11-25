@@ -1,14 +1,30 @@
 # RittaiHarness
 
-RittaiHarness is a single-user, local-first SDLC workspace. Give the Lead Agent a software request, follow every agent attempt and review, and inspect the merged source and verified build. The workspace uses Python’s standard library, SQLite, Git, and Docker. The dashboard binds to loopback.
+**An agent says the build is done. What passed, and where can you try it?**
+
+RittaiHarness turns a software request into a reviewed, runnable build whose decisions and test results you can inspect. It’s a single-user, local-first workspace you can drive from a browser dashboard or an interactive CLI.
+
+The Lead Agent defines acceptance criteria and coordinates six stages from research through release. Independent reviewers check each stage, Docker builds and tests the deliverable, and the workspace keeps the agent attempts, logs, and approvals together. When the gates pass, you can inspect the Git history, download the source ZIP, or open a web app in its sandbox preview. [Try the bundled demo](#start)
+
+## Where it helps
+
+- **Prototype a web app or internal tool.** Hand the Lead a request, try the result in a local preview, and submit a follow-up when you discover what needs to change.
+- **Review agent-generated work.** See which checks ran, why a stage passed or failed, and which Git commit contains the approved work.
+- **Reuse a workflow across projects.** Give specific roles the Skills and read-only MCP tools they need, then use Dreaming to find and consolidate decisions and verified patterns from earlier runs.
+
+## In action
+
+The walkthrough starts in the RittaiHarness workspace and covers the factory, reviews, execution logs, Lead chat, CLI, provider and Docker settings, extensions, Dreaming, and session retry. It ends by launching Fieldwork from the verified build. [Open the walkthrough GIF](docs/screenshots/rittaiharness-walkthrough.gif)
+
+![RittaiHarness feature tour ending with the Fieldwork sandbox launch](docs/screenshots/rittaiharness-walkthrough.gif)
 
 ## Why RittaiHarness?
 
 *Rittai* means three-dimensional. The name comes from *rittai kidō sōchi* (立体機動装置), the maneuvering gear in *Attack on Titan*. The characters wear a harness and use cables to move freely through three-dimensional space. The gold buckle and twin cyan tethers in the original ASCII logo are a nod to that gear. [Official anime glossary](https://shingeki.tv/season1/yougo/)
 
-A software request moves through several kinds of work, from research and design to development and verification. RittaiHarness gives that work a clear structure. The Lead coordinates the handoffs, independent reviewers check each stage, and Docker gives the generated app an isolated place to run. The dashboard and CLI let you follow the same work from the first prompt to the verified build.
+In RittaiHarness, the harness connects the specialist roles and keeps each handoff and its evidence attached to the same run.
 
-## In action
+## Screenshots
 
 ### Team & Factory Line
 
@@ -18,9 +34,11 @@ A software request moves through several kinds of work, from research and design
 
 ![The Live output tab showing the Launch preview button for a verified build](docs/screenshots/launch-preview.jpg)
 
-### Workshop sample
+### Fieldwork demo
 
-![The workshop task board running in the sandbox preview with one completed task](docs/screenshots/workshop-preview.jpg)
+Fieldwork is the bundled alpine expedition planner. Organize tasks across the board, explore the three-day itinerary, track packed gear, and record field notes. The preview stores edits in the browser for its own origin.
+
+![Fieldwork running in the sandbox preview with the Dolomites panorama and the three-column expedition board](docs/screenshots/fieldwork-preview.jpg)
 
 ## Start
 
@@ -33,7 +51,7 @@ make doctor
 make run
 ```
 
-Open [the local workspace](http://127.0.0.1:8765/), create a project, and use **Run demo** to exercise the six-stage factory on a workshop task board. Once the run completes, select **Live output → Launch preview** to open the task board in a separate tab. The demo needs the built images and Docker. Its fixed model responses and example research are bundled.
+Open [the local workspace](http://127.0.0.1:8765/), create a project, and use **Run demo** to exercise the six-stage factory with Fieldwork, an alpine expedition planner. Once the run completes, select **Live output → Launch preview** to open Fieldwork in a separate tab. The demo needs the built images and Docker. Its fixed model responses and example research are bundled.
 
 Use **Provider settings** to connect Microsoft Foundry or another service with a Chat Completions-compatible endpoint. For Foundry project discovery, paste the project endpoint from the portal with its API key or a current Microsoft Entra access token. RittaiHarness adds `/openai/v1` when needed. A resource-only endpoint uses a resource key and a deployment name. Compatible local servers can use a loopback HTTP URL. Other providers use HTTPS. The Lead sends the relevant prompt, source and handoffs to the selected provider.
 
@@ -48,7 +66,7 @@ export OMNI_ENDPOINT=https://YOUR-RESOURCE.services.ai.azure.com/api/projects/YO
 
 ## Run from the terminal
 
-Open the interactive terminal with `./dist/rittaiharness.pyz` or `python3 -m omni`. RittaiHarness opens with an animated ASCII logo and a prompt. Type a request to start a run, then ask the Lead about its progress or results. Use `/run` to submit a new request in the same project, `/watch` to follow a run, and `/help` for the full command list. Try `/demo` to queue the offline workshop demo.
+Open the interactive terminal with `./dist/rittaiharness.pyz` or `python3 -m omni`. RittaiHarness opens with an animated ASCII logo and a prompt. Type a request to start a run, then ask the Lead about its progress or results. Use `/run` to submit a new request in the same project, `/watch` to follow a run, and `/help` for the full command list. Try `/demo` to queue the offline Fieldwork demo.
 
 ```sh
 ./dist/rittaiharness.pyz chat --project "Task board"

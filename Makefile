@@ -14,6 +14,7 @@ check:
 	$(NODE) --check omni/web/app.js
 	$(NODE) --check omni/web/workspace-tools.js
 	$(NODE) --check omni/web/session.js
+	$(NODE) --check omni/sample/app.js
 
 test: check
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v

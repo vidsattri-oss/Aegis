@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#172923">
+  <title>Fieldwork — Expedition planner</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="panorama.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-mark" viewBox="0 0 32 32"><path d="m5 24 8-14 5 9 3-5 6 10"/><path d="M4 27h24"/><circle cx="23" cy="8" r="2.5"/></symbol>
+    <symbol id="i-board" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m6-16v16"/></symbol>
+    <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2"/><circle cx="18" cy="6" r="2"/><path d="M8 18h8a3 3 0 0 0 0-6H8a3 3 0 1 1 0-6h8"/></symbol>
+    <symbol id="i-pack" viewBox="0 0 24 24"><path d="M9 5V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1M7 13h10M8 9h8"/><rect x="5" y="5" width="14" height="16" rx="4"/><path d="M9 13v3m6-3v3"/></symbol>
+    <symbol id="i-journal" viewBox="0 0 24 24"><rect x="5" y="3" width="15" height="18" rx="2"/><path d="M5 7H3m2 5H3m2 5H3m6-9h7m-7 4h7"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 5-8 10-8 10S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4m8-4v4M4 10h16"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 5 5"/></symbol>
+    <symbol id="i-grip" viewBox="0 0 24 24"><path d="M9 6h.01m6 0h.01M9 12h.01m6 0h.01M9 18h.01m6 0h.01" stroke-width="3"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5 5-2Z"/></symbol>
+  </svg>
+
+  <a class="skip" href="#content">Skip to content</a>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <a class="brand" href="#board" aria-label="Fieldwork home">
+        <span class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#i-mark"/></svg></span>
+        <span>Fieldwork</span>
+      </a>
+      <div class="nav-content">
+        <p class="nav-label">Workspace</p>
+        <nav class="navigation" aria-label="Expedition">
+          <a href="#board" data-view="board" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#i-board"/></svg> Board</a>
+          <a href="#itinerary" data-view="itinerary"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg> Itinerary</a>
+          <a href="#gear" data-view="gear"><svg class="icon" aria-hidden="true"><use href="#i-pack"/></svg> Gear</a>
+          <a href="#journal" data-view="journal"><svg class="icon" aria-hidden="true"><use href="#i-journal"/></svg> Journal</a>
+        </nav>
+      </div>
+      <div class="sidebar-bottom">
+        <div class="readiness">
+          <div><span>Expedition readiness</span><strong id="ready-percent">0%</strong></div>
+          <progress id="ready-progress" aria-label="Expedition readiness" value="0" max="100"></progress>
+          <small>Tasks and gear</small>
+        </div>
+        <p class="storage" id="storage"><span></span> Saved on this device</p>
+      </div>
+    </aside>
+
+    <main id="content" tabindex="-1">
+      <header class="topbar">
+        <div class="breadcrumb"><span>Expedition</span><span aria-hidden="true">/</span><strong>The Alpine Edit</strong></div>
+        <button id="new-task" class="button primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg> New task</button>
+      </header>
+      <div class="canvas">
+        <section id="board-panel" data-panel="board" aria-labelledby="expedition-title">
+          <div class="hero">
+            <div class="hero-copy">
+              <span class="hero-location"><svg class="icon" aria-hidden="true"><use href="#i-pin"/></svg> Dolomites, Italy</span>
+              <h1 id="expedition-title">The Alpine Edit</h1>
+              <p>A three-day photography expedition<br class="hero-break"> through the high Dolomites.</p>
+              <div class="hero-footer">
+                <span><svg class="icon" aria-hidden="true"><use href="#i-calendar"/></svg> Sep 17–19, 2027</span>
+                <a href="#itinerary">View itinerary <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+              </div>
+            </div>
+            <span class="photo-caption">Italian Alps</span>
+          </div>
+          <div class="overview" aria-label="Expedition progress">
+            <div class="metric"><span class="metric-icon green"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg></span><div><strong id="tasks-ready">0 / 0</strong><span>Tasks ready</span></div></div>
+            <div class="metric"><span class="metric-icon orange"><svg class="icon" aria-hidden="true"><use href="#i-pack"/></svg></span><div><strong id="gear-packed">0 / 0</strong><span>Gear packed</span></div></div>
+            <div class="metric"><span class="metric-icon violet"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg></span><div><strong>3 days</strong><span>Planned itinerary</span></div></div>
+          </div>
+          <div class="section-head">
+            <div><h2>Expedition board</h2><p>Plan, track, and get ready for the field.</p></div>
+            <div class="board-tools">
+              <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><span class="sr-only">Find tasks</span><input id="task-search" type="search" placeholder="Find tasks"></label>
+              <label class="filter"><span class="sr-only">Filter by category</span><select id="task-filter">
+                <option value="">All categories</option><option>Route</option><option>Gear</option><option>Logistics</option><option>Photo</option>
+              </select></label>
+            </div>
+          </div>
+          <div class="board" id="task-board" aria-label="Tasks by status"></div>
+        </section>
+
+        <section id="itinerary-panel" data-panel="itinerary" aria-labelledby="itinerary-title" hidden>
+          <header class="page-head"><div class="eyebrow"><svg class="icon" aria-hidden="true"><use href="#i-route"/></svg> Sep 17–19, 2027</div><h1 id="itinerary-title" tabindex="-1">The itinerary</h1><p>Three days of ridgelines, refuges, and first light.</p></header>
+          <div class="itinerary-layout">
+            <div class="timeline">
+              <details class="route-day" open><summary><span class="day-date">Sep<strong>17</strong></span><span><small>Day 1 · Arrival</small><strong>Into the mountains</strong></span></summary>
+                <ul><li><time datetime="09:00">09:00</time> Meet in Cortina and check equipment</li><li><time datetime="13:00">13:00</time> Walk the approach and scout framing</li><li><time datetime="18:30">18:30</time> Shoot the west-facing ridgeline</li></ul>
+              </details>
+              <details class="route-day"><summary><span class="day-date">Sep<strong>18</strong></span><span><small>Day 2 · Ridge</small><strong>First light at Tre Cime</strong></span></summary>
+                <ul><li><time datetime="05:30">05:30</time> Set up for sunrise</li><li><time datetime="11:00">11:00</time> Backup cards and review frames</li><li><time datetime="17:30">17:30</time> Photograph the last light from the refuge</li></ul>
+              </details>
+              <details class="route-day"><summary><span class="day-date">Sep<strong>19</strong></span><span><small>Day 3 · Return</small><strong>Down to the valley</strong></span></summary>
+                <ul><li><time datetime="07:00">07:00</time> Shoot the final frames</li><li><time datetime="10:00">10:00</time> Descend to the trailhead</li><li><time datetime="15:00">15:00</time> Compare selects back in Cortina</li></ul>
+              </details>
+            </div>
+            <div class="route-photo"><svg class="icon" aria-hidden="true"><use href="#i-compass"/></svg><strong>Dolomites</strong><span>Italian Alps</span></div>
+          </div>
+        </section>
+
+        <section id="gear-panel" data-panel="gear" aria-labelledby="gear-title" hidden>
+          <header class="page-head"><div class="eyebrow"><svg class="icon" aria-hidden="true"><use href="#i-pack"/></svg> Kit checklist</div><h1 id="gear-title" tabindex="-1">Pack for the field</h1><p>Check off what’s in the bag and add anything missing.</p></header>
+          <div class="packing">
+            <div class="paper">
+              <form id="gear-form" class="inline-form">
+                <label class="sr-only" for="gear-name">Gear item name</label>
+                <input id="gear-name" name="item" required maxlength="80" placeholder="Add a gear item">
+                <button class="button primary" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg> Add item</button>
+              </form>
+              <ul id="gear-list" class="gear-list"></ul>
+            </div>
+            <aside class="paper gear-progress">
+              <span class="metric-icon orange"><svg class="icon" aria-hidden="true"><use href="#i-pack"/></svg></span>
+              <h2>Packing progress</h2><p id="packing-count"></p>
+              <progress id="packing-progress" aria-label="Packing progress" value="0" max="1"></progress>
+            </aside>
+          </div>
+        </section>
+
+        <section id="journal-panel" data-panel="journal" aria-labelledby="journal-title" hidden>
+          <header class="page-head"><div class="eyebrow"><svg class="icon" aria-hidden="true"><use href="#i-journal"/></svg> Expedition notebook</div><h1 id="journal-title" tabindex="-1">Field journal</h1><p>Keep scouting notes, shot ideas, and observations in one place.</p></header>
+          <div class="journal-layout">
+            <div id="journal-entries" class="entries"></div>
+            <form id="journal-form" class="paper journal-form">
+              <h2>New entry</h2>
+              <label>Title<input name="title" required maxlength="80" placeholder="Looking for first light"></label>
+              <label>Notes<textarea name="body" required maxlength="2000" rows="5" placeholder="What did you notice?"></textarea></label>
+              <button class="button primary" type="submit">Save entry</button>
+            </form>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="task-dialog" aria-labelledby="editor-title">
+    <form id="task-form">
+      <header class="dialog-head"><h2 id="editor-title">New task</h2><button class="icon-button" id="close-task" type="button" aria-label="Close task"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></header>
+      <label>Title<input id="task-title" name="title" required maxlength="80" autofocus></label>
+      <label>Notes<textarea name="notes" rows="3" maxlength="300"></textarea></label>
+      <div class="form-columns">
+        <label>Category<select name="category"><option>Route</option><option>Gear</option><option>Logistics</option><option>Photo</option></select></label>
+        <label>Priority<select name="priority"><option>Normal</option><option>High</option></select></label>
+        <label>Owner<select name="owner"><option value="you">You</option><option value="mae">Mae Rivers</option><option value="luca">Luca Vale</option><option value="noa">Noa Kim</option></select></label>
+      </div>
+      <fieldset>
+        <legend>Status</legend>
+        <div class="status-options">
+          <label><input type="radio" name="status" value="planned"> To plan</label>
+          <label><input type="radio" name="status" value="active"> In progress</label>
+          <label><input type="radio" name="status" value="ready"> Ready</label>
+        </div>
+      </fieldset>
+      <footer class="dialog-footer">
+        <button type="button" id="delete-task" class="button danger" hidden>Delete task</button>
+        <button type="submit" id="save-task" class="button primary">Save task</button>
+      </footer>
+    </form>
+  </dialog>
+  <div id="announcement" class="sr-only" role="status"></div>
+</body>
+</html>
