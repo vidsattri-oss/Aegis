@@ -1,0 +1,52 @@
+# Use this file with OMNI_EXTENSIONS, or copy it to your workspace as
+# extensions.toml and adjust the Skill paths relative to the new location.
+
+[[skills]]
+path = "skills/lean-code"
+roles = ["architecture", "development", "review"]
+resources = ["references/checklist.md"]
+
+[[skills]]
+path = "skills/studio-ui-ux"
+roles = ["design", "development", "qa", "review"]
+
+[[mcp]]
+name = "microsoft-learn"
+url = "https://learn.microsoft.com/api/mcp"
+
+# To route tools through Azure AI Gateway, replace the URL above with
+# the published MCP URL and enable the corresponding runtime credential.
+# token_env = "AI_GATEWAY_API_KEY"
+
+[mcp.tools]
+microsoft_docs_search = ["research"]
+microsoft_docs_fetch = ["research"]
+microsoft_code_sample_search = ["research"]
+
+[[mcp]]
+name = "cloudflare-docs"
+url = "https://docs.mcp.cloudflare.com/mcp"
+
+[mcp.tools]
+search_cloudflare_documentation = ["research"]
+migrate_pages_to_workers_guide = ["research"]
+
+# Connect in the dashboard to check the signed-in Cloudflare identity.
+[[mcp]]
+name = "cloudflare-account"
+url = "https://mcp.cloudflare.com/mcp"
+oauth = { scopes = ["user:read", "account:read"] }
+
+[mcp.tools]
+whoami = ["lead"]
+
+#
+# Stdio servers default to a networkless Docker sandbox. Bundle readable code
+# and dependencies in a dedicated directory relative to this configuration.
+# [[mcp]]
+# name = "local-docs"
+# command = ["python", "docs_server.py"]
+# cwd = "mcp/local-docs"
+# To use a trusted host executable, explicitly set isolation = "host".
+# [mcp.tools]
+# search_docs = ["research", "architecture"]
