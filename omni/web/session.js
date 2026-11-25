@@ -9,6 +9,7 @@ const scopeKey = ({ role, stage, attempt }) => [role || "", stage || "", attempt
 const eventNames = {
   container: "Container", tool_call: "Tool call", tool_result: "Tool result", execution_log: "Execution log",
   exception: "Exception", gate_passed: "Gate passed", gate_failed: "Gate failed", review_committed: "Review committed",
+  capacity_wait: "Waiting for Docker capacity", execution_plan: "Docker task sizes",
   released: "Released", preview_stopped: "Preview stopped", cancelled: "Cancelled", interrupted: "Interrupted",
 };
 const toolNames = {
@@ -180,10 +181,11 @@ function logContext(session, telemetry) {
       gate.artifact && node("pre", {}, val(gate.artifact)),
       gate.details && node("pre", {}, val(gate.details)))),
     agent && node("div", { class: "agent-context" }, portrait(agent.role), node("div", {},
-      node("strong", {}, names[agent.role]), muted(badge(agent.status), " ", agent.profile.cpu + " CPU / " + agent.profile.ram + " MB"))),
+      node("strong", {}, names[agent.role]), muted(badge(agent.status), " ", agent.profile.cpu + " CPU / " + agent.profile.ram + " MiB"))),
     details && disclosure("Persona, input and resource details", node("div", { class: "disclosure-body" },
       facts([["Agent ID", code(details.id)], ["Spawned", timestamp(details.started)], ["Terminated", timestamp(details.ended)],
         ["Provider tokens", number.format(details.input_tokens + details.output_tokens)], ["Image", details.profile.image],
+        ["CPU / Memory / Processes", `${details.profile.cpu} / ${details.profile.ram} MiB / ${details.profile.pids}`],
         ["Role tools", details.profile.tools?.join(", ") || "—"],
         ["MCP tools", details.profile.mcp_tools?.join(", ") || "—"],
         ["Skills", details.profile.skills?.join(", ") || "—"]]),
@@ -200,7 +202,7 @@ function eventCard(session, event, telemetry) {
   const details = node("details", { class: "log-event", "data-event": event.id },
     node("summary", {}, node("span", { class: "event-title" }, node("strong", {}, title),
       node("time", { datetime: event.time, title: timestamp(event.time) }, new Date(event.time).toLocaleTimeString())),
-    node("span", { class: "event-context" }, [names[event.role], stageNames[event.stage]].filter(Boolean).join(" · ")),
+    node("span", { class: "event-context" }, [names[event.role], stageNames[event.stage], event.model].filter(Boolean).join(" · ")),
     event.excerpt && node("span", { class: "event-excerpt" }, event.excerpt)));
   const body = node("div", { class: "event-detail" });
   details.append(body);
@@ -317,7 +319,7 @@ function sessionPage(session) {
     const panel = $("#session-panel");
     panel.classList.toggle("map-panel", id === "map");
     panel.setAttribute("aria-labelledby", "tab-" + id);
-    panel.replaceChildren(...[panels[id](state.session)].flat().filter(Boolean));
+    panel.replaceChildren(...[panels[id](state.session)].flat(Infinity).filter(Boolean));
     if (id === "map") { renderLogPanel(); loadTelemetry(); }
   };
   const tabs = node("div", { class: "tabs", role: "tablist", id: "session-tabs", "aria-label": "Session views",

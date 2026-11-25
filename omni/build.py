@@ -26,7 +26,8 @@ def main():
     app = target / "rittaiharness-src.tar.gz"
     temporary = target / "rittaiharness-src.tmp"
     with tarfile.open(temporary, "w:gz") as archive:
-        for name in ("README.md", "Makefile", ".gitignore", ".dockerignore", "containers", "omni", "tests", "examples"):
+        for name in ("README.md", "Makefile", ".gitignore", ".dockerignore", "containers", "omni", "tests", "examples",
+                     "docs/screenshots"):
             path = ROOT / name
             if path.is_file():
                 archive.add(path, arcname=name)

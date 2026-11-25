@@ -11,8 +11,8 @@ PROFILES = {
     "architecture": ("worker", 0.5, 128, 48),
     "design": ("worker", 0.5, 128, 48),
     "development": ("runtime", 1, 256, 64),
-    "qa": ("qa", 2, 1536, 256),
-    "deploy": ("runtime", 1, 512, 128),
+    "qa": ("worker", 0.5, 128, 48),
+    "deploy": ("worker", 0.5, 128, 48),
     "review": ("worker", 0.5, 128, 48),
 }
 PERSONAS = {

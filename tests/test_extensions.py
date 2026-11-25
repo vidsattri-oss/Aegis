@@ -164,6 +164,7 @@ resources = ["check.md"]
 
 [[mcp]]
 name = "fixture"
+isolation = "host"
 command = [{json.dumps(os.sys.executable)}, "server.py"]
 [mcp.tools]
 search_docs = ["development"]

@@ -7,6 +7,7 @@ import re
 import secrets
 import signal
 import threading
+from html import escape
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -15,10 +16,12 @@ from urllib.parse import parse_qs, urlsplit
 
 from .engine import Lead
 from .contracts import PERSONAS, STAGES, require
+from .sandbox import detected_capacity
 
 WEB = files("omni").joinpath("web")
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+          "/workspace-tools.js": ("workspace-tools.js", "text/javascript; charset=utf-8"),
           "/session.js": ("session.js", "text/javascript; charset=utf-8"),
           "/styles.css": ("styles.css", "text/css; charset=utf-8"),
           "/agent-portraits.png": ("agent-portraits.png", "image/png")}
@@ -70,12 +73,12 @@ class Handler(BaseHTTPRequestHandler):
     def json(self, data, status=200):
         self.send(status, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
-    def body(self):
+    def body(self, maximum=40_000):
         if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
             raise HTTPFailure(415, "Expected an application/json request")
         require(not self.headers.get("Transfer-Encoding"), "Chunked requests are unsupported")
         length = int(self.headers.get("Content-Length", "0"))
-        require(0 < length <= 40_000, "Invalid request size")
+        require(0 < length <= maximum, "Invalid request size")
         data = json.loads(self.rfile.read(length))
         require(isinstance(data, dict), "Expected a JSON object")
         return data
@@ -104,7 +107,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise HTTPFailure(403, "Missing workspace request token")
             location = urlsplit(self.path)
             if self.command == "POST":
-                self.change(location.path, self.body())
+                maximum = 1_200_000 if location.path in ("/api/extensions/config", "/api/extensions/skill") else 40_000
+                self.change(location.path, self.body(maximum))
             else:
                 self.read(location.path, parse_qs(location.query))
         except (BrokenPipeError, ConnectionResetError):
@@ -128,10 +132,32 @@ class Handler(BaseHTTPRequestHandler):
                        "provider": lead.provider(), "memory": store.memory_health()})
         elif path == "/api/extensions":
             self.json(lead.extensions())
+        elif path == "/api/extensions/config":
+            self.json(lead.extension_editor() | {"callback": self.server.base_url + "/oauth/mcp/callback"})
+        elif path == "/api/extensions/skill":
+            self.json(lead.skill_files(query.get("name", [""])[0]))
+        elif path == "/oauth/mcp/callback" and self.command == "GET":
+            try:
+                lead.mcp_oauth.finish(query)
+            except (ValueError, OSError, RuntimeError, http.client.HTTPException) as exc:
+                message = escape(store.redact(str(exc)))
+                page = f'<!doctype html><meta charset="utf-8"><title>MCP sign-in</title><h1>MCP sign-in</h1><p>{message}</p><a href="/#extensions">Return to Extensions</a>'
+                self.send(400, page.encode(), "text/html; charset=utf-8")
+            else:
+                self.send(303, b"", "text/plain", {"Location": "/#extensions"})
+        elif path in ("/api/memory/history", "/api/memory/records"):
+            page = int(query.get("page", [0])[0])
+            search = query.get("q", [""])[0]
+            require(0 <= page <= 100_000 and len(search) <= 200, "Invalid Dreaming query")
+            self.json(store.dream_history(page) if path.endswith("/history") else store.memory_browser(search, page))
+        elif path == "/api/execution":
+            self.json(lead.execution_settings())
+        elif path == "/api/execution/pressure":
+            lead.capacity.set_engine_capacity(detected_capacity(lead.docker))
+            self.json(lead.capacity.report())
         elif path == "/api/doctor":
             try:
-                lead.docker.doctor()
-                self.json({"ready": True})
+                self.json({"ready": True, "capacity": lead.docker.doctor()})
             except Exception as exc:
                 self.json({"ready": False, "detail": store.redact(str(exc))})
         elif match := PROJECT.fullmatch(path):
@@ -147,6 +173,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.agent(session_id, agent_id, query)
             elif action == "telemetry" and not agent_id:
                 self.telemetry(session_id, query)
+            elif action == "messages" and not agent_id:
+                lead.get(session_id)
+                question = int(query.get("reply_to", [0])[0])
+                require(0 < question < 2 ** 63, "Invalid message identifier")
+                self.json({"reply": store.chat_reply(session_id, question)})
             elif action == "build" and not agent_id:
                 session = lead.get(session_id)
                 if not session["bundle"] or session["state"] != "completed":
@@ -216,8 +247,23 @@ class Handler(BaseHTTPRequestHandler):
             self.json(lead.credential(data))
         elif path == "/api/provider/test":
             self.json(lead.test_provider())
+        elif path == "/api/doctor/full":
+            self.json(lead.preflight(models=data.get("models") is True))
+        elif path == "/api/execution":
+            self.json(lead.configure_execution(data))
         elif path == "/api/extensions/check":
             self.json(lead.extensions(check=True))
+        elif path == "/api/extensions/config":
+            self.json(lead.save_extensions(data))
+        elif path == "/api/extensions/skill":
+            self.json(lead.save_skill(data))
+        elif path in ("/api/extensions/oauth/start", "/api/extensions/oauth/disconnect"):
+            server = lead.oauth_server(data.get("name"))
+            if path.endswith("/start"):
+                self.json({"url": lead.mcp_oauth.begin(server, self.server.base_url + "/oauth/mcp/callback")})
+            else:
+                lead.mcp_oauth.disconnect(server)
+                self.json({"connected": False})
         elif path == "/api/memory/dream":
             result = lead.dream()
             if result is None:
@@ -230,8 +276,8 @@ class Handler(BaseHTTPRequestHandler):
             if agent_id:
                 raise HTTPFailure(404, "Unknown workspace endpoint")
             if action == "messages":
-                lead.chat(session_id, data.get("text"))
-                self.json({"queued": True}, 202)
+                question = lead.chat(session_id, data.get("text"))
+                self.json({"queued": True, "message_id": question}, 202)
             elif action == "cancel":
                 lead.cancel(session_id)
                 self.json({"cancelled": True}, 202)

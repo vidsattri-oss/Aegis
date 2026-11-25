@@ -4,20 +4,24 @@ import http.client
 import json
 import os
 import threading
+import tomllib
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
 
 from . import demo
 from .credentials import ProviderCredentials, validate_key
 from .contracts import CONTRACTS, GUARD, INJECT, LABELS, PERSONAS, STAGES, manifest, require, validate
-from .extensions import Extensions
+from .extensions import BROWSER_SKILL_BYTES, Extensions, atomic_text, bounded_text, browser_skill, configuration
+from .mcp_oauth import MCPOAuth
 from .integrations import (DEFAULT_HOSTS, NAME, VERSION, advisories, complete, environment_provider, fetch_source,
-                           initial_provider, list_provider_models, packages, provider_key, provider_settings)
+                           foundry_project_endpoint, initial_provider, list_provider_models, packages, provider_key,
+                           provider_settings)
 from .repository import Repository
+from .preflight import CACHES, check_workspace
 from .role_tools import ROLE_TOOLS
-from .sandbox import Docker, profile
+from .sandbox import MAX_SESSIONS, ContainerCapacity, Docker, detected_capacity, execution_plan, execution_policy, profile
 from .store import Store, encode, now, uid
 
 ACTIVE = ("queued", "running")
@@ -27,6 +31,7 @@ ATTEMPTS = 3
 
 def check_provider(settings, key, model=complete):
     require(settings["kind"] != "demo", "Configure a model provider before testing it")
+    settings = model_for_role(settings, "lead")
     result, _ = model(settings, key, "Reply with OK.", {"check": "RittaiHarness provider connectivity"}, 25)
     require(isinstance(result, str) and result.strip(), "Provider returned an empty response")
     return {"ready": True, "kind": settings["kind"], "model": settings["model"]}
@@ -37,6 +42,36 @@ def discover_models(settings, credentials, key=""):
     redact = credentials.store.redact
     redact.add(key)
     return redact(list_provider_models(settings, key))
+
+
+def with_model_pool(settings, models, assignments):
+    eligible = {model["id"] for model in models if model["chat"] is not False}
+    require(eligible, "Deploy a model that supports Chat Completions in this Foundry project, then try again")
+    require(isinstance(assignments, dict) and all(role in PERSONAS and isinstance(alias, str) and alias in eligible
+                                                for role, alias in assignments.items()),
+            "One or more agent assignments are missing from the project's chat deployments. Reload the deployments and update those assignments.")
+    return {**settings, "deployments": models, "role_models": assignments}
+
+
+def prepare_provider(settings, credentials, key=""):
+    if foundry_project_endpoint(settings) and not settings["model"] and "deployments" not in settings:
+        models = discover_models(settings, credentials, key)["models"]
+        return with_model_pool(settings, models, {})
+    return settings
+
+
+def model_for_role(settings, role, session_id=None):
+    if not settings.get("deployments"):
+        return settings
+    assigned = settings["role_models"].get(role)
+    if not assigned:
+        deployments = settings["deployments"]
+        available = [model for model in deployments if model["chat"] is True]
+        if not available:
+            available = [model for model in deployments if model["chat"] is None]
+        offset = int(session_id, 16) if session_id else 0
+        assigned = available[(offset + tuple(PERSONAS).index(role)) % len(available)]["id"]
+    return {**settings, "model": assigned}
 
 
 class Cancelled(Exception):
@@ -51,6 +86,8 @@ class Lead:
         self.model, self.scan, self.fetch = model, scan, fetch
         self.workspace = self.store.workspace_id()
         self.credentials = ProviderCredentials(self.store, backend=keyring)
+        self.mcp_oauth = MCPOAuth(self.store.redact)
+        self.extension_lock = threading.Lock()
         configured = initial_provider()
         saved_provider = self.store.setting("provider")
         owner = configured if environment_provider() else saved_provider or configured
@@ -60,15 +97,21 @@ class Lead:
             self.store.set("provider", configured)
         self.lock = threading.RLock()
         self.maintenance_lock = threading.Lock()
+        self.docker_lock = threading.Lock()
         self.jobs = {}
+        self.pending = {}
+        self.active_projects = set()
         self.projects = {}
         self.previews = {}
+        self.capacity = ContainerCapacity(lambda: self.docker.external_usage(self.workspace))
+        self.session_limit = execution_policy(self.store.setting("execution"))["sessions"]
         self.closed = threading.Event()
         self.reconciled = False
         self.timeout = max(30, min(900, int(os.environ.get("OMNI_STAGE_TIMEOUT", "240"))))
         self.dream_interval = max(10, int(os.environ.get("OMNI_DREAM_INTERVAL", "300")))
         self.preview_lifetime = max(30, min(86400, int(os.environ.get("OMNI_PREVIEW_SECONDS", "3600"))))
-        self.workers = ThreadPoolExecutor(max_workers=3, thread_name_prefix="factory")
+        self.workers = ThreadPoolExecutor(max_workers=MAX_SESSIONS, thread_name_prefix="factory")
+        self.reviewers = ThreadPoolExecutor(max_workers=2 * MAX_SESSIONS, thread_name_prefix="gate-review")
         self.chats = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lead-chat")
         self.research_hosts = tuple(dict.fromkeys((*DEFAULT_HOSTS, *(
             name.strip().lower() for name in os.environ.get("OMNI_RESEARCH_HOSTS", "").split(",") if name.strip()
@@ -100,6 +143,14 @@ class Lead:
 
     def configure(self, data):
         settings = provider_settings(data)
+        if foundry_project_endpoint(settings) and not settings["model"]:
+            previous = self.store.setting("provider")
+            if (data.get("forget_key") is True or data.get("clear_key") is True) and settings["endpoint"] == previous.get("endpoint"):
+                if "deployments" in previous:
+                    settings = with_model_pool(settings, previous["deployments"], data.get("role_models", previous["role_models"]))
+            else:
+                models = discover_models(settings, self.credentials, data.get("api_key", ""))["models"]
+                settings = with_model_pool(settings, models, data.get("role_models", {}))
         self.credential(data)
         self.store.set("provider", settings)
         return self.provider()
@@ -108,11 +159,83 @@ class Lead:
         return discover_models(self.provider_target(data), self.credentials, data.get("api_key", ""))
 
     def extensions(self, check=False):
-        return Extensions(self.store.directory, self.store.redact).describe(check)
+        return Extensions(self.store.directory, self.store.redact, oauth=self.mcp_oauth, docker=self.docker,
+                          workspace=self.workspace).describe(check)
+
+    def extension_editor(self):
+        path, writable = configuration(self.store.directory)
+        content = bounded_text(path, 64_000) if path.exists() else ""
+        return {"config": str(path), "text": content, "writable": writable, "roles": list(PERSONAS)}
+
+    def save_extensions(self, data):
+        content = data.get("text")
+        require(isinstance(content, str) and len(content.encode()) <= 64_000, "Configuration must be at most 64,000 UTF-8 bytes")
+        with self.extension_lock:
+            previous = self.extension_editor()
+            require(previous["writable"], "Edit the OMNI_EXTENSIONS file outside the dashboard")
+            require(data.get("base") == previous["text"], "The configuration changed. Reopen the editor and try again.")
+            updated = Extensions(self.store.directory, self.store.redact, oauth=self.mcp_oauth, config_text=content)
+            try:
+                old = tomllib.loads(previous["text"]).get("mcp", [])
+            except tomllib.TOMLDecodeError:
+                old = []
+            old_hosts = [item for item in old if isinstance(item, dict) and item.get("isolation") == "host"] if isinstance(old, list) else []
+            new_hosts = [item for item in tomllib.loads(content).get("mcp", []) if item.get("isolation") == "host"]
+            require(all(item in old_hosts for item in new_hosts), "Configure changes to trusted host commands directly in extensions.toml")
+            atomic_text(updated.path, content)
+        return updated.describe()
+
+    def skill_files(self, name):
+        extension = Extensions(self.store.directory, self.store.redact)
+        skill = next((item for item in extension.skills if item["name"] == name), None)
+        require(skill, "Skill does not exist")
+        return {"name": name, "roles": skill["roles"], "files": {"SKILL.md": skill["text"], **skill["resources"]}}
+
+    def save_skill(self, data):
+        files, grants, original = data.get("files"), data.get("roles"), data.get("original")
+        skill = browser_skill(files, grants)
+        name = skill["name"]
+        with self.extension_lock:
+            extension = Extensions(self.store.directory, self.store.redact)
+            names = {item["name"] for item in extension.skills}
+            if original:
+                require(original == name and original in names, "Keep the Skill name when editing an existing Skill")
+                require(data.get("base") == self.skill_files(original), "The Skill changed. Reopen it and try again.")
+            else:
+                require(name not in names, "A Skill with that name exists. Open it to edit its files.")
+            managed = extension.browser_skills | {name: {"files": files, "roles": skill["roles"]}}
+            Extensions(self.store.directory, self.store.redact, browser_skills=managed)
+            content = json.dumps(managed, ensure_ascii=False, indent=2)
+            require(len(content.encode()) <= BROWSER_SKILL_BYTES, "The workspace Skill files exceed their total size limit")
+            atomic_text(extension.browser_path, content)
+        return {"name": name}
+
+    def oauth_server(self, name):
+        extension = Extensions(self.store.directory, self.store.redact)
+        server = next((item for item in extension.servers if item["name"] == name and "oauth" in item), None)
+        require(server, "Configure browser OAuth for this MCP server first")
+        return server
 
     def test_provider(self):
-        settings = self.store.setting("provider")
+        settings = prepare_provider(self.store.setting("provider"), self.credentials)
         return check_provider(settings, self.credentials.get(settings), self.model)
+
+    def preflight(self, *, models=False):
+        provider_check = self.test_provider if models and self.provider()["kind"] != "demo" else None
+        return check_workspace(self.docker, self.store, provider_check)
+
+    def execution_settings(self):
+        capacity = detected_capacity(self.docker)
+        self.capacity.set_engine_capacity(capacity)
+        return execution_plan(execution_policy(self.store.setting("execution")), capacity)
+
+    def configure_execution(self, data):
+        policy = execution_policy(data)
+        with self.lock:
+            self.store.set("execution", policy)
+            self.session_limit = policy["sessions"]
+            self.dispatch_sessions()
+        return self.execution_settings()
 
     def launch(self, project_id, prompt, sample=False):
         require(self.store.row("SELECT id FROM projects WHERE id=?", (project_id,)), "Project does not exist")
@@ -123,6 +246,7 @@ class Lead:
                 prompt = demo.PROMPT
             else:
                 require(config["kind"] != "demo", "Configure a model provider or run the built-in demo")
+                config = prepare_provider(config, self.credentials)
             require(isinstance(prompt, str) and 1 <= len(prompt.strip()) <= 16000, "Enter a request up to 16,000 characters")
             require(not INJECT.search(prompt), "Request contains a disallowed instruction pattern")
             sid = self.store.session(project_id, prompt.strip(), config)
@@ -133,7 +257,21 @@ class Lead:
     def submit(self, session_id):
         with self.lock:
             if not self.closed.is_set():
-                self.jobs[session_id] = self.workers.submit(self.run, session_id)
+                self.pending[session_id] = self.get(session_id)["project_id"]
+                self.dispatch_sessions()
+
+    def dispatch_sessions(self):
+        # Work waiting on the same project's earlier session consumes no worker slot.
+        if self.closed.is_set():
+            return
+        for sid, project_id in tuple(self.pending.items()):
+            if len(self.jobs) >= self.session_limit:
+                break
+            if project_id in self.active_projects:
+                continue
+            del self.pending[sid]
+            self.active_projects.add(project_id)
+            self.jobs[sid] = self.workers.submit(self.run, sid, project_id)
 
     def close(self):
         self.closed.set()
@@ -142,6 +280,7 @@ class Lead:
         for preview in previews:
             preview.close()
         self.workers.shutdown(wait=True, cancel_futures=True)
+        self.reviewers.shutdown(wait=True, cancel_futures=True)
         self.chats.shutdown(wait=True, cancel_futures=True)
         self.dream_thread.join(timeout=2)
 
@@ -158,7 +297,11 @@ class Lead:
             return self.store.dream()
 
     def cancel(self, session_id):
-        require(self.store.cancel(session_id), "Session is inactive or already stopping")
+        with self.lock:
+            require(self.store.cancel(session_id), "Session is inactive or already stopping")
+            if self.pending.pop(session_id, None) is not None:
+                self.store.event(session_id, "cancelled", {"message": "Session cancelled while queued"})
+                self.store.update(session_id, state="cancelled", error=None)
 
     def retry(self, session_id):
         with self.maintenance_lock, self.lock:
@@ -187,14 +330,13 @@ class Lead:
         return self.store.redact({"type": type(exc).__name__, "message": str(exc)[:2500],
                                   "stack": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-16000:]})
 
-    def run(self, sid):
-        session = self.get(sid)
-        with self.lock:
-            project_lock = self.projects.setdefault(session["project_id"], threading.Lock())
+    def run(self, sid, project_id):
         try:
+            with self.lock:
+                project_lock = self.projects.setdefault(project_id, threading.Lock())
             with project_lock:
                 self.check(sid)
-                self._run(session)
+                self._run(self.get(sid))
         except Cancelled as exc:
             if self.closed.is_set() and not self.get(sid)["cancellation"]:
                 self.store.update(sid, state="queued", error=None)
@@ -211,26 +353,50 @@ class Lead:
         finally:
             with self.lock:
                 self.jobs.pop(sid, None)
+                self.active_projects.discard(project_id)
+                self.dispatch_sessions()
+
+    def prepare_docker(self):
+        with self.docker_lock:
+            if self.reconciled:
+                capacity = self.docker.engine_capacity()
+            else:
+                capacity = self.docker.doctor()
+                self.docker.probe_mounts(self.store.directory)
+                self.docker.clean_orphans(self.workspace)
+                self.reconciled = True
+            self.capacity.set_engine_capacity(capacity)
+            return capacity
+
+    def reserve_containers(self, session, until, profiles):
+        holder = {"session_id": session["id"], "stage": session["stage"]}
+        return self.capacity.reserve(profiles, lambda: self.check(session["id"], until), lambda usage: self.store.event(
+            session["id"], "capacity_wait", {"stage": session["stage"], "message": "Waiting for Docker CPU and memory",
+                                               "tasks": [item["task"] for item in profiles], "pressure": usage}), holder=holder)
 
     def _run(self, session):
         sid = session["id"]
         self.store.update(sid, state="running", error=None)
         tree = self.repo.checkout(session)
         try:
-            self.docker.doctor()
-            with self.lock:
-                if not self.reconciled:
-                    self.docker.clean_orphans(self.workspace)
-                    self.reconciled = True
+            capacity = self.prepare_docker()
+            session["execution"] = execution_plan(execution_policy(self.store.setting("execution")), capacity)
         except Exception as exc:
             self.repo.audit(tree, session, "lead", uid(), self.exception(exc))
             raise
+        self.store.event(sid, "execution_plan", {"message": "Docker task sizes resolved for this run", "stage": session["stage"],
+                                                 "capacity": capacity, "limits": session["execution"]["limits"]})
         sample = session["provider"]["kind"] == "demo"
-        extensions = None if sample else Extensions(self.store.directory, self.store.redact)
+        if session["provider"]["kind"] in ("foundry", "azure-gateway"):
+            require(self.credentials.get(session["provider"]), "Load a provider credential before running this session")
+        extensions = None if sample else Extensions(self.store.directory, self.store.redact, docker=self.docker,
+                                                   oauth=self.mcp_oauth,
+                                                   workspace=self.workspace, resources=profile("mcp", session["execution"]))
         previous = self.repo.prior_source(tree, session)
         approved = {}
         for stage in ("lead", *STAGES):
             self.check(sid)
+            session["stage"] = stage
             self.store.update(sid, stage=stage)
             saved = self.repo.saved_stage(tree, session, stage)
             if saved:
@@ -292,9 +458,19 @@ class Lead:
                 data["assignment"] = assigned
             agent_id = uid()
             try:
-                with self.agent(session, stage, stage, number, data, until, agent_id, extensions=extensions) as role:
+                task = {"development": "build", "deploy": "release"}.get(stage)
+                if stage == "qa":
+                    task = "qa_browser" if manifest(approved["development"]["files"])["mode"] == "web" else "qa_artifact"
+                profiles = [profile(stage, session["execution"])]
+                if extensions:
+                    profiles += extensions.sandbox_profiles(stage)
+                execution_resources = profile(task, session["execution"]) if task else None
+                if execution_resources:
+                    profiles.append(execution_resources)
+                with (self.reserve_containers(session, until, profiles),
+                      self.agent(session, stage, stage, number, data, until, agent_id, extensions=extensions) as role):
                     artifact, role_evidence = self.produce(session, stage, data, approved, role, until, sample)
-                    evidence = self.verify(session, stage, artifact, approved, role, until, sample)
+                    evidence = self.verify(session, stage, artifact, approved, role, until, sample, execution_resources)
                     evidence["role_tool"] = role_evidence
                 self.check(sid, until)
                 review_candidate = artifact
@@ -306,18 +482,8 @@ class Lead:
                                "approved": {key: {"summary": value["summary"]} for key, value in approved.items()},
                                "candidate": review_candidate, "evidence": evidence, "retry_context": failure,
                                "hive_memory": memory}
-                with self.agent(session, stage, "review", number, review_data, until, extensions=extensions) as reviewer:
-                    checklist = self.role_tool(session, reviewer, "evidence_check",
-                                               {"stage": stage, "evidence": evidence}, until)
-                    review_data["verified_evidence"] = checklist
-                    review = self.ask(session, "review", review_data, reviewer, until, sample)
-                    review = self.role_tool(session, reviewer, "submit", {"draft": review}, until)
-                    verdict_commit = self.repo.review(tree, session, stage, reviewer["id"], review)
-                    self.store.event(sid, "review_committed", {"commit": verdict_commit, "stage": stage}, reviewer["id"])
-                    if not review["passed"]:
-                        raise ValueError("Independent QA rejected the deliverable. " + review["feedback"])
-                details = {"review": review, "evidence": evidence, "attempt": number,
-                           "reviewer": reviewer["id"], "review_commit": verdict_commit}
+                reviews = self.review_gate(session, tree, stage, number, review_data, until, sample, extensions)
+                details = {**reviews[0], "reviews": reviews, "evidence": evidence, "attempt": number}
                 self.check(sid, until)
                 sha = self.repo.approve(tree, session, stage, artifact, details, agent_id)
                 self.remember(session, stage, artifact, memory, failure)
@@ -349,6 +515,48 @@ class Lead:
                     ])
                     raise
 
+    def review_gate(self, session, tree, stage, number, data, until, sample, extensions):
+        sid = session["id"]
+
+        def evaluate(focus=None):
+            inputs = {**data, "review_focus": focus} if focus else dict(data)
+            profiles = [profile("review", session["execution"])]
+            if extensions:
+                profiles += extensions.sandbox_profiles("review")
+            with (self.reserve_containers(session, until, profiles),
+                  self.agent(session, stage, "review", number, inputs, until, extensions=extensions) as agent):
+                inputs["verified_evidence"] = self.role_tool(session, agent, "evidence_check",
+                                                             {"stage": stage, "evidence": data["evidence"]}, until)
+                draft = self.ask(session, "review", inputs, agent, until, sample)
+                verdict = self.role_tool(session, agent, "submit", {"draft": draft}, until)
+                if not verdict["passed"]:
+                    agent["rejection"] = verdict["feedback"]
+                return {"reviewer": agent["id"], "review": verdict, "focus": focus}
+
+        failure = None
+        if session["execution"]["parallel_reviews"]:
+            futures = [self.reviewers.submit(evaluate, focus) for focus in ("Acceptance criteria", "Execution evidence")]
+            wait(futures)
+            results = []
+            for future in futures:
+                if error := future.exception():
+                    failure = failure or error
+                else:
+                    results.append(future.result())
+        else:
+            results = [evaluate()]
+        for result in results:
+            verdict = result["review"]
+            commit = self.repo.review(tree, session, stage, result["reviewer"], verdict)
+            result["review_commit"] = commit
+            self.store.event(sid, "review_committed", {"commit": commit, "stage": stage, "focus": result["focus"],
+                                                       "passed": verdict["passed"]}, result["reviewer"])
+        if failure:
+            raise failure
+        rejections = [item["review"]["feedback"] for item in results if not item["review"]["passed"]]
+        require(not rejections, "Independent QA rejected the deliverable. " + " ".join(rejections))
+        return results
+
     @contextmanager
     def agent(self, session, stage, role, number, data, until, agent_id=None, *, extensions=None):
         sid = session["id"]
@@ -374,7 +582,7 @@ class Lead:
                 "Return your normal deliverable when you have enough evidence."
             )
         persona += extension_instructions
-        resources = profile(role)
+        resources = profile(role, session["execution"])
         started = time.monotonic()
         self.store.write("""
             INSERT INTO attempts (id,session_id,stage,role,number,status,profile,started,persona,input)
@@ -388,7 +596,7 @@ class Lead:
         try:
             with ExitStack() as resources_scope:
                 tracker["submit"] = resources_scope.enter_context(
-                    self.docker.role(name, self.workspace, role, self.check(sid, until)))
+                    self.docker.role(name, self.workspace, role, self.check(sid, until), resources=resources))
                 if mcp_granted:
                     def report(server, details):
                         self.store.event(sid, "tool_result", {"tool": f"mcp.catalog.{server}", **details}, agent_id)
@@ -399,6 +607,9 @@ class Lead:
                     resources["mcp_tools"] = sorted(tracker["mcp"])
                     self.store.write("UPDATE attempts SET profile=? WHERE id=?", (encode(resources), agent_id))
                 yield tracker
+                if "rejection" in tracker:
+                    status = "Retried" if number < ATTEMPTS else "Failed"
+                    trace = {"type": "ReviewRejected", "message": tracker["rejection"]}
         except Exception as exc:
             status = "Retried" if number < ATTEMPTS and not isinstance(exc, Cancelled) else "Failed"
             trace = self.exception(exc)
@@ -437,11 +648,12 @@ class Lead:
 
     def ask_model(self, session, role, data, agent, until, sample, *, instruction=None):
         sid = session["id"]
+        settings = model_for_role(session["provider"], role, sid)
         persona = agent["persona"]
         if instruction:
             persona = PERSONAS[role] + "\n\n" + GUARD + "\n\n" + instruction + agent["extension_instructions"]
-        self.store.event(sid, "tool_call", {"tool": "model.chat", "provider": session["provider"]["kind"],
-                                           "persona": persona, "input": data}, agent["id"])
+        self.store.event(sid, "tool_call", {"tool": "model.chat", "provider": settings["kind"],
+                                           "model": settings.get("model"), "persona": persona, "input": data}, agent["id"])
         if sample:
             if role == "review":
                 result = {"passed": True,
@@ -452,15 +664,15 @@ class Lead:
             tokens = (0, 0)
             raw = encode(result)
         else:
-            key = self.credentials.get(session["provider"])
-            raw, tokens = self.model(session["provider"], key, persona, self.store.redact(data),
+            key = self.credentials.get(settings)
+            raw, tokens = self.model(settings, key, persona, self.store.redact(data),
                                      min(150, self.check(sid, until)))
             result = None
-        settings = session["provider"]
         cost = (tokens[0] * settings["input_rate"] + tokens[1] * settings["output_rate"]) / 1_000_000
         self.store.write("""UPDATE attempts SET input_tokens=input_tokens+?,output_tokens=output_tokens+?,
                             model_cost=model_cost+? WHERE id=?""", (*tokens, cost, agent["id"]))
-        self.store.event(sid, "tool_result", {"tool": "model.chat", "usage": list(tokens), "output": raw}, agent["id"])
+        self.store.event(sid, "tool_result", {"tool": "model.chat", "model": settings.get("model"),
+                                             "usage": list(tokens), "output": raw}, agent["id"])
         self.check(sid, until)
         result = json.loads(raw) if result is None else result
         require(isinstance(result, dict), "Provider must return a single JSON object")
@@ -568,10 +780,10 @@ class Lead:
         evidence = self.role_tool(session, agent, name, {**arguments, "draft": artifact}, until)
         return artifact, evidence
 
-    def execution(self, session, agent, source, checks, until, role):
+    def execution(self, session, agent, source, checks, until, role, resources):
         sid = session["id"]
         name = agent["name"] + ("-qa" if role == "qa" else "-build")
-        self.store.event(sid, "tool_call", {"tool": "docker.execute", "name": name, "profile": profile(role)},
+        self.store.event(sid, "tool_call", {"tool": "docker.execute", "name": name, "profile": resources},
                          agent["id"])
         start = time.monotonic()
 
@@ -579,13 +791,14 @@ class Lead:
             self.store.event(sid, "execution_log", {"container": name, "output": output}, agent["id"])
 
         try:
-            return self.docker.execute(name, self.workspace, role, source, checks, self.check(sid, until), log)
+            return self.docker.execute(name, self.workspace, role, source, checks, self.check(sid, until), log,
+                                       resources=resources)
         finally:
-            cost = (time.monotonic() - start) / 3600 * profile(role)["cpu"] * session["provider"]["compute_rate"]
+            cost = (time.monotonic() - start) / 3600 * resources["cpu"] * session["provider"]["compute_rate"]
             self.store.write("UPDATE attempts SET compute_cost=compute_cost+? WHERE id=?", (cost, agent["id"]))
             self.store.event(sid, "container", {"event": "execution ended", "name": name}, agent["id"])
 
-    def verify(self, session, stage, artifact, approved, agent, until, sample):
+    def verify(self, session, stage, artifact, approved, agent, until, sample, resources):
         evidence = {"contract": "passed"}
         if stage == "development":
             files = artifact["files"]
@@ -593,11 +806,15 @@ class Lead:
             architecture = approved["architecture"]
             require(all(architecture[key] == config[key] for key in ("runtime", "mode")),
                     "Generated runtime and mode must match the approved architecture")
-            evidence["dependency_scan"] = self.scan_dependencies(session, agent, packages(files), until)
+            dependencies = packages(files)
+            for ecosystem in {name for name, _, _ in dependencies}:
+                variable = CACHES[ecosystem][0]
+                require(os.environ.get(variable), f"Set {variable} to build this app with offline {ecosystem} packages")
+            evidence["dependency_scan"] = self.scan_dependencies(session, agent, dependencies, until)
             require(not evidence["dependency_scan"]["vulnerabilities"], "Dependency scan blocked known advisories: "
                     + ", ".join(item["id"] for item in evidence["dependency_scan"]["vulnerabilities"]))
             source = self.repo.stage_source(session, files)
-            evidence.update(self.execution(session, agent, source, None, until, "deploy"))
+            evidence.update(self.execution(session, agent, source, None, until, "deploy", resources))
         elif stage == "qa":
             criteria = {item["id"] for item in approved["lead"]["criteria"]}
             mapped = {item["criterion"] for item in artifact["checks"]}
@@ -609,13 +826,13 @@ class Lead:
             source = self.repo.stage_source(session, files)
             checks = self.repo.staging / (session["id"] + "-checks")
             self.repo.write_json(checks / "journeys.json", artifact["journeys"])
-            evidence.update(self.execution(session, agent, source, checks, until, "qa"))
+            evidence.update(self.execution(session, agent, source, checks, until, "qa", resources))
             evidence["criteria"] = artifact["checks"]
             evidence["browser_journeys"] = [journey["name"] for journey in artifact["journeys"]]
         elif stage == "deploy":
             files = approved["development"]["files"]
             source = self.repo.stage_source(session, files)
-            evidence.update(self.execution(session, agent, source, None, until, "deploy"))
+            evidence.update(self.execution(session, agent, source, None, until, "deploy", resources))
             evidence["output"] = manifest(files)["mode"]
         elif stage == "research":
             evidence["sources"] = artifact["sources"]
@@ -656,11 +873,7 @@ class Lead:
                 preview = self.start_preview(session, files)
             self.check(sid)
             merge_commit = self.repo.merge(tree, session)
-            self.store.update(sid, state="completed", bundle=str(bundle), preview=preview.url if preview else None)
-            self.store.event(sid, "released", {"commit": merge_commit, "build": str(bundle),
-                                               "preview": preview.url if preview else None})
-            self.store.message(sid, "lead", "All six stages passed. The reviewed changes are merged and the build "
-                               "is available in Live Output.")
+            self.store.release(sid, merge_commit, str(bundle), preview.url if preview else None)
         except Exception as exc:
             if preview:
                 preview.close()
@@ -673,28 +886,40 @@ class Lead:
             existing = self.previews.get(sid)
             if existing and not existing.closed.is_set():
                 return existing
+        capacity = self.prepare_docker()
+        policy = session.get("execution") or execution_plan(execution_policy(self.store.setting("execution")), capacity)
+        resources = profile("preview", policy)
         source = self.repo.stage_source(session, files)
-        for number in range(1, ATTEMPTS + 1):
-            container = f"omni-{self.workspace[:8]}-{uid()}-preview"
-            self.store.event(sid, "tool_call", {"tool": "preview.start", "attempt": number, "name": container})
-            try:
-                preview = self.docker.preview(container, self.workspace, source, self.preview_lifetime)
-                break
-            except Exception as exc:
-                self.store.event(sid, "exception", {**self.exception(exc), "stage": "deploy"})
-                if number == ATTEMPTS:
-                    raise
-        with self.lock:
-            self.previews[sid] = preview
+        with ExitStack() as reservation:
+            reservation.enter_context(self.reserve_containers(session, time.monotonic() + self.timeout, [resources]))
+            for number in range(1, ATTEMPTS + 1):
+                container = f"omni-{self.workspace[:8]}-{uid()}-preview"
+                self.store.event(sid, "tool_call", {"tool": "preview.start", "attempt": number, "name": container,
+                                                   "profile": resources})
+                try:
+                    preview = self.docker.preview(container, self.workspace, source, self.preview_lifetime,
+                                                  resources=resources)
+                    break
+                except Exception as exc:
+                    self.store.event(sid, "exception", {**self.exception(exc), "stage": "deploy"})
+                    if number == ATTEMPTS:
+                        raise
+            with self.lock:
+                if self.closed.is_set() or preview.closed.is_set():
+                    preview.close()
+                    raise Cancelled("Preview stopped before registration")
+                hold = reservation.pop_all()
+                self.previews[sid] = preview
 
-            def detached(closed):
-                with self.lock:
-                    if self.previews.get(sid) is closed:
-                        self.previews.pop(sid, None)
-                        self.store.update(sid, preview=None)
-                        self.store.event(sid, "preview_stopped", {"url": closed.url})
+                def detached(closed):
+                    hold.close()
+                    with self.lock:
+                        if self.previews.get(sid) is closed:
+                            self.previews.pop(sid, None)
+                            self.store.update(sid, preview=None)
+                            self.store.event(sid, "preview_stopped", {"url": closed.url})
 
-            preview.on_close = detached
+                preview.on_close = detached
         return preview
 
     def change_preview(self, session_id, start):
@@ -723,10 +948,11 @@ class Lead:
         require(isinstance(message, str) and 0 < len(message.strip()) <= 4000, "Enter a message up to 4,000 characters")
         require(not INJECT.search(message), "Message contains a disallowed instruction pattern")
         self.get(sid)
-        self.store.message(sid, "user", message.strip())
-        self.chats.submit(self.reply, sid, self.store.redact(message.strip()))
+        question_id = self.store.message(sid, "user", message.strip())
+        self.chats.submit(self.reply, sid, question_id, self.store.redact(message.strip()))
+        return question_id
 
-    def reply(self, sid, message):
+    def reply(self, sid, question_id, message):
         session = self.store.summary(sid)
         gates = {gate["stage"]: gate["state"] for gate in session["gates"]}
         label = LABELS.get(session["stage"], "Planning")
@@ -736,18 +962,24 @@ class Lead:
         if session["error"]:
             response += session["error"] + " "
         if session["provider"]["kind"] != "demo":
-            context = {"question": message, "state": session["state"], "stage": label, "gates": gates,
+            history = [{key: value[:1200] for key, value in turn.items()}
+                       for turn in reversed(self.store.chat_history(sid, question_id))]
+            context = {"question": message, "request": session["prompt"], "conversation": history,
+                       "state": session["state"], "stage": label, "gates": gates,
                        "branch": session["branch"], "session_cost": session["cost"], "error": session["error"]}
             persona = (PERSONAS["lead"] + "\n" + GUARD + "\nAnswer this session question using known facts only. "
                        'Return {"answer":"..."}. To change scope direct the user to start a follow-up session.')
             try:
-                key = self.credentials.get(session["provider"])
-                self.store.event(sid, "tool_call", {"tool": "lead.chat", "stage": session["stage"], "persona": persona, "input": context})
-                raw, usage = self.model(session["provider"], key, persona, context, 25)
+                settings = model_for_role(session["provider"], "lead", sid)
+                key = self.credentials.get(settings)
+                self.store.event(sid, "tool_call", {"tool": "lead.chat", "stage": session["stage"], "model": settings["model"],
+                                                   "persona": persona, "input": context})
+                raw, usage = self.model(settings, key, persona, context, 25)
                 answer = json.loads(raw).get("answer")
                 if isinstance(answer, str) and answer.strip():
                     response = answer[:6000]
-                self.store.event(sid, "tool_result", {"tool": "lead.chat", "stage": session["stage"], "output": raw, "usage": list(usage)})
+                self.store.event(sid, "tool_result", {"tool": "lead.chat", "stage": session["stage"], "model": settings["model"],
+                                                     "output": raw, "usage": list(usage)})
                 # Status chat is attributed to the Lead so project totals include every provider call.
                 model_cost = (usage[0] * session["provider"]["input_rate"]
                               + usage[1] * session["provider"]["output_rate"]) / 1_000_000
@@ -758,4 +990,4 @@ class Lead:
                     *usage, model_cost))
             except Exception as exc:
                 self.store.event(sid, "exception", {**self.exception(exc), "stage": session["stage"]})
-        self.store.message(sid, "lead", response.strip())
+        self.store.message(sid, "lead", response.strip(), reply_to=question_id)

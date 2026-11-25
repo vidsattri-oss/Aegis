@@ -1,97 +1,140 @@
 """Repeatable six-stage sample. The sample runs the same gates as live providers."""
+import base64
 import json
+from importlib.resources import files
 
-PROMPT = "Build a workshop task board where I can add tasks, mark them done, and keep them after a reload."
-TITLE = "Workshop task board"
+PROMPT = (
+    "Build Fieldwork, an expedition planner for a three-day photography trip in the Dolomites. "
+    "Include a task board, an expandable itinerary, a packing checklist and a field journal. "
+    "Keep edits after reload and make the application work offline in the preview."
+)
+TITLE = "Fieldwork — Expedition planner"
+ASSETS = files("omni").joinpath("sample")
+# The build contract accepts text files. Embedding WebP in CSS keeps the preview offline.
+PANORAMA = base64.b64encode(ASSETS.joinpath("dolomites.webp").read_bytes()).decode("ascii")
 FILES = {
     "harness.json": json.dumps({"runtime": "static", "mode": "web"}),
-    "index.html": """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Workshop task board</title>
-<link rel="stylesheet" href="styles.css"><script src="app.js" defer></script></head>
-<body><main><p>WORKSHOP</p><h1>Workshop task board</h1><form>
-<label for="task">New task</label><div><input id="task" required maxlength="120"><button>Add task</button></div>
-</form><ul id="tasks" aria-label="Task list"></ul><p id="count" aria-live="polite"></p></main></body></html>""",
-    "styles.css": """*{box-sizing:border-box}body{margin:0;background:#e9edf4;color:#192840;font:1rem system-ui}
-main{max-width:46rem;margin:8vh auto;background:#fff;padding:clamp(1rem,5vw,3rem);border-radius:1.2rem}
-h1{margin-top:0;font-size:clamp(1.8rem,5vw,3rem)}label{display:block;margin:.7rem 0}
-form div{display:flex;gap:.6rem}input,button{font:inherit;border-radius:.55rem;padding:.65rem}
-input{border:1px solid #73819a;min-width:0;flex:1}button{background:#243c70;color:#fff;border:0;cursor:pointer}
-ul{list-style:none;padding:0}li{display:flex;align-items:center;justify-content:space-between;gap:1rem;
-padding:.6rem 0;border-bottom:1px solid #ccd5e5}li[data-done=true] span{text-decoration:line-through}""",
-    "app.js": """const list = document.querySelector('#tasks');
-const count = document.querySelector('#count');
-const input = document.querySelector('#task');
-let tasks;
-try { tasks = JSON.parse(localStorage.getItem('workshop-tasks') || '[]'); } catch { tasks = []; }
-if (!Array.isArray(tasks)) tasks = [];
-function render() {
-  list.replaceChildren();
-  for (const task of tasks) {
-    const item = document.createElement('li');
-    item.dataset.done = task.done;
-    const name = document.createElement('span');
-    name.textContent = task.name;
-    const button = document.createElement('button');
-    button.textContent = task.done ? 'Reopen' : 'Mark done';
-    button.addEventListener('click', () => { task.done = !task.done; save(); });
-    item.append(name, button);
-    list.append(item);
-  }
-  count.textContent = tasks.filter(task => task.done).length + ' completed';
+    **{name: ASSETS.joinpath(name).read_text(encoding="utf-8") for name in ("index.html", "styles.css", "app.js")},
+    "panorama.css": f':root{{--panorama:url("data:image/webp;base64,{PANORAMA}");}}\n',
 }
-function save() { localStorage.setItem('workshop-tasks', JSON.stringify(tasks)); render(); }
-document.querySelector('form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  const name = input.value.trim();
-  if (!name) return;
-  tasks.push({name, done: false});
-  save();
-  input.value = '';
-  input.focus();
-});
-render();
-""",
-}
+
 SOURCE = "https://developer.mozilla.org/en-US/docs/Web/API/Window/localStorage"
 EXAMPLES = {
-    "lead": {"summary": "Build and verify a local workshop task board.",
-             "stages": {"research": "Evaluate browser persistence.", "architecture": "Design a static app.",
-                        "design": "Specify the task interaction.", "development": "Implement the task board.",
-                        "qa": "Exercise task creation, completion and persistence.",
-                        "deploy": "Package the build and start a local preview."},
-             "criteria": [{"id": "AC1", "description": "Add a task from a labeled input."},
-                          {"id": "AC2", "description": "Mark a task complete and see the updated count."},
-                          {"id": "AC3", "description": "Retain the task and completion after reload."}]},
-    "research": {"summary": "Use native browser APIs for a dependency-free task board.",
-                 "findings": ["localStorage persists per origin and requires no backend.",
-                              "Render task names with textContent to keep input as data."],
-                 "sources": [SOURCE], "decisions": ["Use version-independent browser APIs with no third-party packages."]},
-    "architecture": {"summary": "Serve a dependency-free static application.", "runtime": "static", "mode": "web",
-                     "components": ["Task form", "Task list", "Browser persistence"],
-                     "dataModel": "An array of task objects containing name and done.",
-                     "api": "GET / serves the application; no remote data API.",
-                     "boundaries": "Tasks are stored under the isolated preview origin.",
-                     "decisions": ["Keep rendering and state in the browser."]},
-    "design": {"summary": "Provide one keyboard-accessible task workflow.",
-               "flows": ["Enter a task, submit the form, then mark it complete."],
-               "wireframes": ["Page heading, labeled task input, action button, task list and progress count."],
-               "components": ["Task form", "Task row", "Progress announcement"],
-               "accessibility": ["Use native buttons, a visible input label and a live completion count."],
-               "decisions": ["Use a single responsive page."]},
-    "development": {"summary": "Implemented task entry, completion and local persistence.", "files": FILES},
-    "qa": {"summary": "Verify the complete task journey in Chromium.",
-           "checks": [{"criterion": "AC1", "evidence": "Submit the form and assert the task appears."},
-                      {"criterion": "AC2", "evidence": "Click Mark done and assert the completed count."},
-                      {"criterion": "AC3", "evidence": "Navigate to the root again and assert persisted data."}],
-           "journeys": [{"name": "Add, complete and restore a task", "steps": [
-               {"action": "goto", "path": "/"}, {"action": "fill", "selector": "#task", "value": "Cut frame"},
-               {"action": "click", "selector": "form button"}, {"action": "text", "selector": "li", "value": "Cut frame"},
-               {"action": "click", "selector": "li button"}, {"action": "text", "selector": "#count", "value": "1 completed"},
-               {"action": "goto", "path": "/"}, {"action": "text", "selector": "li", "value": "Cut frame"},
-               {"action": "text", "selector": "#count", "value": "1 completed"},
-           ]}]},
-    "deploy": {"summary": "Package the tested task board and serve it over a loopback preview.",
-               "instructions": ["Open the preview to enter and complete tasks.",
-                                "Download the source build to serve index.html using a local HTTP server."],
-               "decisions": ["Serve the same files that passed browser verification."]},
+    "lead": {
+        "summary": "Build and verify an offline alpine expedition planner.",
+        "stages": {
+            "research": "Evaluate native browser persistence and controls.",
+            "architecture": "Design the offline app and its data model.",
+            "design": "Specify the four expedition views and their interactions.",
+            "development": "Implement a responsive, editable expedition workspace.",
+            "qa": "Exercise each view and verify that edits survive reload.",
+            "deploy": "Package the verified build and start the sandbox preview.",
+        },
+        "criteria": [
+            {"id": "AC1", "description": "Create and move a task and retain the change after reload."},
+            {"id": "AC2", "description": "Open the itinerary and expand a day's schedule."},
+            {"id": "AC3", "description": "Add and pack a gear item and retain the packing count after reload."},
+            {"id": "AC4", "description": "Write a journal entry and retain it after reload."},
+        ],
+    },
+    "research": {
+        "summary": "Use native browser APIs with no runtime dependencies.",
+        "findings": [
+            "localStorage persists per origin and requires no backend.",
+            "Native dialog, details and form controls support keyboard interactions.",
+            "Render user content as text and bundle the panorama with the application.",
+        ],
+        "sources": [SOURCE],
+        "decisions": ["Use browser primitives and keep all assets available offline."],
+    },
+    "architecture": {
+        "summary": "Serve one static application with four navigable views.",
+        "runtime": "static",
+        "mode": "web",
+        "components": ["Task board", "Itinerary", "Gear checklist", "Field journal", "Browser persistence"],
+        "dataModel": "One versioned browser store holds tasks, packing items and journal entries.",
+        "api": "GET / serves the planner. Views use URL fragments and all writes are local.",
+        "boundaries": "Edits belong to the isolated preview origin.",
+        "decisions": ["Ship HTML, CSS and JavaScript without a network dependency."],
+    },
+    "design": {
+        "summary": "Give users four responsive views with visible progress.",
+        "flows": [
+            "Create or open a task, choose a status, and save it to the appropriate column.",
+            "Browse the itinerary, check off the packing list, and write a journal entry.",
+        ],
+        "wireframes": [
+            "Expedition navigation, panoramic hero, progress strip and three board columns.",
+            "Day-by-day itinerary, gear checklist with packing progress and a journal with entry form.",
+        ],
+        "components": ["Navigation", "Task editor", "Progress indicators", "Day schedules", "Journal entries"],
+        "accessibility": [
+            "Use labeled fields, native dialog, keyboard-accessible status controls and live feedback.",
+            "Use text labels alongside the status colors and stack the board at narrow widths.",
+        ],
+        "decisions": ["Use a warm paper palette, landscape photography and compact board cards."],
+    },
+    "development": {"summary": "Implemented Fieldwork and bundled its offline assets.", "files": FILES},
+    "qa": {
+        "summary": "Verify the board, itinerary, packing and journal journeys in Chromium.",
+        "checks": [
+            {"criterion": "AC1", "evidence": "Create a task, edit its status, reload, and find it in Ready."},
+            {"criterion": "AC2", "evidence": "Open the itinerary and expand Day 2 to inspect its sunrise schedule."},
+            {"criterion": "AC3", "evidence": "Add and pack an item and assert the packing count after reload."},
+            {"criterion": "AC4", "evidence": "Save a note and assert that its title and body survive reload."},
+        ],
+        "journeys": [
+            {"name": "Create, move and restore a task", "steps": [
+                {"action": "goto", "path": "/"},
+                {"action": "title", "value": TITLE},
+                {"action": "click", "selector": "#new-task"},
+                {"action": "fill", "selector": "#task-title", "value": "Prepare shot list"},
+                {"action": "click", "selector": "#save-task"},
+                {"action": "visible", "selector": '[data-status="planned"] [aria-label="Edit Prepare shot list"]'},
+                {"action": "click", "selector": '[aria-label="Edit Prepare shot list"]'},
+                {"action": "click", "selector": '#task-form input[value="ready"]'},
+                {"action": "click", "selector": "#save-task"},
+                {"action": "goto", "path": "/?check=board#board"},
+                {"action": "visible", "selector": '[data-status="ready"] [aria-label="Edit Prepare shot list"]'},
+                {"action": "text", "selector": "#tasks-ready", "value": "3 / 7"},
+                {"action": "fill", "selector": "#task-search", "value": "shot list"},
+                {"action": "text", "selector": '[data-status="planned"] .empty-lane', "value": "No matching tasks"},
+            ]},
+            {"name": "Open a day's itinerary", "steps": [
+                {"action": "goto", "path": "/"},
+                {"action": "click", "selector": '.hero a[href="#itinerary"]'},
+                {"action": "visible", "selector": "#itinerary-title"},
+                {"action": "click", "selector": ".route-day:nth-child(2) summary"},
+                {"action": "visible", "selector": ".route-day:nth-child(2) li:first-child"},
+                {"action": "text", "selector": ".route-day:nth-child(2) li:first-child", "value": "Set up for sunrise"},
+            ]},
+            {"name": "Pack an item and restore the checklist", "steps": [
+                {"action": "goto", "path": "/?journey=gear#gear"},
+                {"action": "fill", "selector": "#gear-name", "value": "Lens cloth"},
+                {"action": "click", "selector": "#gear-form button"},
+                {"action": "click", "selector": "#gear-list li:last-child label"},
+                {"action": "goto", "path": "/?check=gear#gear"},
+                {"action": "text", "selector": "#packing-count", "value": "5 of 9 items packed"},
+                {"action": "visible", "selector": "#gear-list li:last-child input:checked"},
+                {"action": "text", "selector": "#gear-list li:last-child", "value": "Lens cloth"},
+            ]},
+            {"name": "Save and restore a journal entry", "steps": [
+                {"action": "goto", "path": "/?journey=journal#journal"},
+                {"action": "fill", "selector": '#journal-form input[name="title"]', "value": "Blue hour"},
+                {"action": "fill", "selector": "#journal-form textarea", "value": "Scout the quieter side of the ridge."},
+                {"action": "click", "selector": "#journal-form button"},
+                {"action": "goto", "path": "/?check=journal#journal"},
+                {"action": "text", "selector": "#journal-entries article:first-child h2", "value": "Blue hour"},
+                {"action": "text", "selector": "#journal-entries article:first-child p", "value": "Scout the quieter side of the ridge."},
+            ]},
+        ],
+    },
+    "deploy": {
+        "summary": "Package the verified expedition planner and start its sandbox preview.",
+        "instructions": [
+            "Open the preview to explore the board, itinerary, gear and journal.",
+            "Download the build to serve it with any local static HTTP server.",
+        ],
+        "decisions": ["Serve the same files that passed browser verification."],
+    },
 }

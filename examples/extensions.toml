@@ -6,6 +6,10 @@ path = "skills/lean-code"
 roles = ["architecture", "development", "review"]
 resources = ["references/checklist.md"]
 
+[[skills]]
+path = "skills/studio-ui-ux"
+roles = ["design", "development", "qa", "review"]
+
 [[mcp]]
 name = "microsoft-learn"
 url = "https://learn.microsoft.com/api/mcp"
@@ -17,12 +21,32 @@ url = "https://learn.microsoft.com/api/mcp"
 [mcp.tools]
 microsoft_docs_search = ["research"]
 microsoft_docs_fetch = ["research"]
+microsoft_code_sample_search = ["research"]
+
+[[mcp]]
+name = "cloudflare-docs"
+url = "https://docs.mcp.cloudflare.com/mcp"
+
+[mcp.tools]
+search_cloudflare_documentation = ["research"]
+migrate_pages_to_workers_guide = ["research"]
+
+# Connect in the dashboard to check the signed-in Cloudflare identity.
+[[mcp]]
+name = "cloudflare-account"
+url = "https://mcp.cloudflare.com/mcp"
+oauth = { scopes = ["user:read", "account:read"] }
+
+[mcp.tools]
+whoami = ["lead"]
+
 #
-# Stdio servers use a preinstalled executable:
+# Stdio servers default to a networkless Docker sandbox. Bundle readable code
+# and dependencies in a dedicated directory relative to this configuration.
 # [[mcp]]
 # name = "local-docs"
-# command = ["/absolute/path/to/python3", "docs_server.py"]
-# cwd = "/absolute/path/to/server"
-# env = []
+# command = ["python", "docs_server.py"]
+# cwd = "mcp/local-docs"
+# To use a trusted host executable, explicitly set isolation = "host".
 # [mcp.tools]
 # search_docs = ["research", "architecture"]

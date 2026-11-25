@@ -9,13 +9,14 @@ import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 from zipfile import ZipFile
 
 from omni import demo
 from omni.contracts import STAGES, manifest, validate
 from omni.engine import Lead, TERMINAL
 from omni.integrations import fetch_source, packages, provider_settings
-from omni.sandbox import Docker
+from omni.sandbox import ContainerCapacity, Docker, execution_plan, execution_policy, profile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,13 +41,22 @@ class DockerFixture:
         self.executions = []
 
     def doctor(self):
+        return self.engine_capacity()
+
+    def engine_capacity(self):
+        return None
+
+    def external_usage(self, workspace):
+        return None
+
+    def probe_mounts(self, directory):
         pass
 
     def clean_orphans(self, _):
         pass
 
     @contextmanager
-    def role(self, name, workspace, role, timeout):
+    def role(self, name, workspace, role, timeout, *, resources=None):
         self.names.append((name, role))
         yield lambda tool, arguments, remaining: self.invoke_in_worker(role, tool, arguments, remaining)
 
@@ -63,7 +73,7 @@ class DockerFixture:
             raise ValueError(error)
         return answer["result"]
 
-    def execute(self, name, workspace, role, source, checks, timeout, log):
+    def execute(self, name, workspace, role, source, checks, timeout, log, *, resources=None):
         self.executions.append(role)
         if role == "qa":
             assert (source / "index.html").exists()
@@ -75,7 +85,7 @@ class DockerFixture:
         log("Execution fixture completed")
         return {"execution": "fixture", "exitCode": 0}
 
-    def preview(self, name, workspace, directory, lifetime):
+    def preview(self, name, workspace, directory, lifetime, *, resources=None):
         return PreviewFixture()
 
 
@@ -247,6 +257,119 @@ class WorkspaceTest(unittest.TestCase):
         self.assertGreater(store.dream()["synthesized"], 0)
         self.assertGreater(store.memory_health()["links"], 1)
 
+    def test_concurrent_sessions_skip_a_project_already_using_a_worker(self):
+        lead = self.lead(DockerFixture())
+        lead.configure_execution({"sessions": 2})
+        first = lead.store.project("Project one", "")
+        second = lead.store.project("Project two", "")
+        first_started, another_started, release = threading.Event(), threading.Event(), threading.Event()
+
+        def run_fixture(session):
+            if session["project_id"] == first["id"]:
+                first_started.set()
+                self.assertTrue(release.wait(5))
+            else:
+                another_started.set()
+            lead.store.update(session["id"], state="completed")
+
+        with patch.object(lead, "_run", side_effect=run_fixture):
+            try:
+                first_session = lead.launch(first["id"], "", sample=True)
+                self.assertTrue(first_started.wait(3))
+                queued = lead.launch(first["id"], "", sample=True)
+                other = lead.launch(second["id"], "", sample=True)
+                self.assertTrue(another_started.wait(3))
+                self.assertEqual(lead.get(queued)["state"], "queued")
+                lead.cancel(queued)
+                self.assertEqual(lead.get(queued)["state"], "cancelled")
+                self.assertEqual(self.completed(lead, other)["state"], "completed")
+            finally:
+                release.set()
+            self.assertEqual(self.completed(lead, first_session)["state"], "completed")
+
+    def test_parallel_reviews_both_have_to_pass_a_gate(self):
+        docker = DockerFixture()
+        barrier = threading.Barrier(2, timeout=5)
+        lock = threading.Lock()
+        votes = 0
+        original = docker.role
+
+        @contextmanager
+        def role(name, workspace, role_name, timeout, *, resources=None):
+            with original(name, workspace, role_name, timeout, resources=resources) as invoke:
+                if role_name != "review":
+                    yield invoke
+                    return
+                barrier.wait()
+
+                def review(tool, arguments, remaining):
+                    nonlocal votes
+                    if tool == "submit":
+                        with lock:
+                            votes += 1
+                            reject = votes == 1
+                        if reject:
+                            arguments = {"draft": {"passed": False, "checks": ["Criteria"], "feedback": "Revise the plan."}}
+                    return invoke(tool, arguments, remaining)
+
+                yield review
+
+        docker.role = role
+        lead = self.lead(docker)
+        lead.configure_execution({"parallel_reviews": True, "limits": {"review": {"ram": 192}}})
+        project = lead.store.project("Parallel review fixture", "")
+        sid = lead.launch(project["id"], "", sample=True)
+        result = self.completed(lead, sid)
+        self.assertEqual(result["state"], "completed", result["error"])
+        plan = result["gates"][0]
+        self.assertEqual(plan["details"]["attempt"], 2)
+        self.assertEqual({entry["focus"] for entry in plan["details"]["reviews"]}, {"Acceptance criteria", "Execution evidence"})
+        self.assertEqual(votes, 16)
+        self.assertTrue(all(agent["profile"]["ram"] == 192 for agent in result["agents"] if agent["role"] == "review"))
+
+    def test_container_limits_and_reservations_keep_docker_flags_and_capacity(self):
+        policy = execution_plan(execution_policy({"limits": {"qa_browser": {"cpu": 1.75, "ram": 896, "pids": 150}}}), None)
+        resources = profile("qa_browser", policy)
+        flags = Docker.args("test", "test", "qa_browser", resources=resources)
+        for flag in ("--cpus=1.75", "--memory=896m", "--memory-swap=896m", "--pids-limit=150", "--shm-size=256m"):
+            self.assertIn(flag, flags)
+        self.assertNotIn("--shm-size=256m", Docker.args("test", "test", "qa"))
+        with self.assertRaises(ValueError):
+            execution_policy({"limits": {"qa_browser": {"privileged": True}}})
+        capacity = ContainerCapacity()
+        capacity.set_engine_capacity({"cpu": 2, "ram": 2048})
+        waiting, acquired = threading.Event(), threading.Event()
+
+        def other_task():
+            with capacity.reserve([resources], lambda: 1, lambda _: waiting.set()):
+                acquired.set()
+
+        with capacity.reserve([resources], lambda: 1, lambda _: None):
+            thread = threading.Thread(target=other_task)
+            thread.start()
+            self.assertTrue(waiting.wait(2))
+            self.assertFalse(acquired.is_set())
+            capacity.set_engine_capacity({"cpu": 4, "ram": 2048})
+            self.assertTrue(acquired.wait(2))
+        thread.join(2)
+        self.assertTrue(acquired.is_set())
+        self.assertEqual(capacity.used, (0, 0))
+
+    def test_automatic_task_sizing_uses_engine_capacity_and_preserves_manual_fields(self):
+        # Old settings included untouched reference values even when no limits were intentionally pinned.
+        policy = execution_policy({"limits": {"qa_browser": {"cpu": 2, "ram": 1536, "pids": 180}}})
+        self.assertEqual(policy["overrides"], {"qa_browser": {"pids": 180}})
+        small = execution_plan(policy, {"cpu": 2, "ram": 2048})
+        desktop = execution_plan(policy, {"cpu": 8, "ram": 3741})
+        large = execution_plan(policy, {"cpu": 32, "ram": 32768})
+        self.assertEqual(small["limits"]["qa_browser"], {"cpu": 0.75, "ram": 768, "pids": 180})
+        self.assertEqual(desktop["limits"]["qa_browser"], {"cpu": 2, "ram": 1408, "pids": 180})
+        self.assertEqual(large["limits"]["qa_browser"], {"cpu": 4, "ram": 3072, "pids": 180})
+        self.assertEqual(small["limits"]["research"]["ram"], 96)
+        self.assertEqual(execution_policy(large), policy)
+        pinned = execution_policy({"overrides": {"qa_browser": {"ram": 1536}}})
+        self.assertEqual(execution_plan(pinned, small["capacity"])["limits"]["qa_browser"]["ram"], 1536)
+
     def test_contract_guards_paths_dependencies_and_browser_targets(self):
         files = {**demo.FILES, "../escape": "content"}
         with self.assertRaises(ValueError):
@@ -262,6 +385,6 @@ class WorkspaceTest(unittest.TestCase):
         qa["journeys"][0]["steps"][0]["path"] = "//example.com"
         with self.assertRaises(ValueError):
             validate("qa", qa)
-        docker = Docker.args("test", "test", "qa")
+        docker = Docker.args("test", "test", "qa_browser")
         for flag in ("--network=none", "--read-only", "--cap-drop=ALL", "--user=10001:10001", "--shm-size=256m"):
             self.assertIn(flag, docker)

@@ -5,22 +5,27 @@ import http.client
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from urllib.parse import urlencode
+from zipfile import BadZipFile
 
 from .contracts import LABELS, PERSONAS, STAGES, require
+from .continuity import DATABASE, backup_workspace, restore_workspace, user_service
 from .credentials import ProviderCredentials
-from .engine import Lead, TERMINAL, check_provider, discover_models
+from .engine import Lead, TERMINAL, check_provider, discover_models, prepare_provider
 from .extensions import Extensions
 from .integrations import environment_provider, initial_provider, provider_key, provider_settings
-from .sandbox import Docker
+from .preflight import check_workspace
+from .sandbox import ContainerCapacity, Docker, detected_capacity, execution_plan, execution_policy
 from .server import main as serve
 from .server import workspace_lock
 from .store import Store
+from .terminal import Terminal
 
 IDENTIFIER = re.compile(r"[0-9a-f]{16}\Z")
 MISSING = object()
@@ -83,11 +88,29 @@ class RemoteWorkspace:
     def extensions(self, check):
         return self.request("/api/extensions/check", {}) if check else self.request("/api/extensions")
 
+    def execution_settings(self, data=MISSING):
+        return self.request("/api/execution", data)
+
+    def pressure(self):
+        return self.request("/api/execution/pressure")
+
+    def preflight(self, models):
+        return self.request("/api/doctor/full", {"models": models})
+
     def provider_test(self):
         return self.request("/api/provider/test", {})
 
     def run(self, project, prompt, sample):
         return self.request(f"/api/projects/{project}/sessions", {"prompt": prompt, "sample": sample})["id"]
+
+    def chat(self, session, message):
+        result = self.request(f"/api/sessions/{session}/messages", {"text": message})
+        message_id = result.get("message_id")
+        require(isinstance(message_id, int), "Restart the dashboard with this version to receive terminal chat replies")
+        return message_id
+
+    def chat_reply(self, session, message_id):
+        return self.request(f"/api/sessions/{session}/messages?reply_to={message_id}")["reply"]
 
     def cancel(self, session):
         self.request(f"/api/sessions/{session}/cancel", {})
@@ -144,20 +167,48 @@ class LocalWorkspace:
     def extensions(self, check):
         return Extensions(self.store.directory, self.store.redact).describe(check)
 
+    def execution_settings(self, data=MISSING):
+        if data is MISSING:
+            policy = execution_policy(self.store.setting("execution"))
+        else:
+            policy = execution_policy(data)
+            self.store.set("execution", policy)
+        return execution_plan(policy, detected_capacity(Docker()))
+
+    def pressure(self):
+        docker = Docker()
+        capacity = ContainerCapacity(lambda: docker.external_usage(None))
+        capacity.set_engine_capacity(detected_capacity(docker))
+        return capacity.report()
+
+    def preflight(self, models):
+        settings = initial_provider(require_model=False) if environment_provider() else self.provider()
+        provider_check = self.provider_test if models and settings["kind"] != "demo" else None
+        return check_workspace(Docker(), self.store, provider_check)
+
     def provider_test(self):
         settings = initial_provider() if environment_provider() else self.provider()
         key = provider_key(settings["kind"]) or self.credentials.get(settings)
         self.store.redact.add(key)
         try:
-            return check_provider(settings, key)
+            return check_provider(prepare_provider(settings, self.credentials, key), key)
         except (ValueError, RuntimeError) as exc:
             raise ValueError(self.store.redact(str(exc))) from None
 
     def run(self, project, prompt, sample):
         return self.lead.launch(project, prompt, sample=sample)
 
+    def chat(self, session, message):
+        return self.lead.chat(session, message)
+
+    def chat_reply(self, session, message_id):
+        return self.store.chat_reply(session, message_id)
+
     def cancel(self, session):
-        require(self.store.cancel(session), "Session is inactive or already stopping")
+        if self.lead:
+            self.lead.cancel(session)
+        else:
+            require(self.store.cancel(session), "Session is inactive or already stopping")
 
     def retry(self, session):
         self.lead.retry(session)
@@ -187,7 +238,7 @@ def workspace(args):
     remote = remote_workspace(args.data, getattr(args, "connect", None))
     if remote is not None:
         yield remote
-    elif args.command in ("run", "retry", "preview"):
+    elif args.command in ("chat", "run", "retry", "preview"):
         with workspace_lock(args.data):
             lead = Lead(args.data)
             try:
@@ -210,6 +261,158 @@ def project_id(backend, name, create=False):
     require(create and not IDENTIFIER.fullmatch(name), "Project does not exist")
     require(0 < len(name.strip()) <= 100, "Enter a project name up to 100 characters")
     return backend.create(name.strip())["id"]
+
+
+def configure_environment_provider(backend):
+    if environment_provider():
+        settings = initial_provider()
+        backend.configure({**settings, "api_key": provider_key(settings["kind"])})
+
+
+class ChatShell:
+    def __init__(self, backend, args):
+        self.backend = backend
+        self.terminal = Terminal(not args.no_animation)
+        self.project = args.project
+        self.session = None
+        if args.session:
+            self.attach(args.session)
+
+    def attach(self, sid):
+        require(IDENTIFIER.fullmatch(sid), "Enter a valid session ID")
+        session = self.backend.status(sid)
+        self.project = session["project_id"]
+        self.session = sid
+
+    def start(self, request, *, demo=False):
+        if not demo:
+            require(request, "Enter a request after /run")
+            configure_environment_provider(self.backend)
+        project = self.project or ("Workshop demo" if demo else "Workspace")
+        identifier = project_id(self.backend, project, create=True)
+        self.session = self.backend.run(identifier, request, demo)
+        self.project = identifier
+        self.terminal.write(f"{self.session}. Ask the Lead a question or use /watch.", label="Queued ", tone="gold")
+
+    def ask(self, message):
+        question = self.backend.chat(self.session, message)
+        deadline = time.monotonic() + 45
+        with self.terminal.waiting("Waiting for the Lead") as pause:
+            while time.monotonic() < deadline:
+                reply = self.backend.chat_reply(self.session, question)
+                if reply:
+                    self.terminal.write(reply["text"], label="Lead > ")
+                    return
+                pause(0.4)
+        self.terminal.write("The Lead is still working on your question. Use /messages to check for the reply.")
+
+    def show_status(self, *, watch=False):
+        previous = None
+        with (self.terminal.waiting("Watching the run") if watch else nullcontext()) as pause:
+            while True:
+                session = self.backend.status(self.session)
+                stage = LABELS.get(session["stage"], "Lead plan")
+                passed = sum(gate["state"] == "passed" for gate in session["gates"])
+                snapshot = (session["state"], stage, passed)
+                if snapshot != previous:
+                    self.terminal.status(session["id"], session["state"], stage, passed)
+                    previous = snapshot
+                if not watch or session["state"] in TERMINAL:
+                    for field in ("error", "bundle", "preview"):
+                        if session.get(field):
+                            self.terminal.write(f"{field.title()}  {session[field]}")
+                    return
+                pause(0.5)
+
+    def command(self, command, arg):
+        if command in ("/status", "/watch", "/messages", "/cancel", "/retry"):
+            require(self.session, "Start a run or select a session with /resume SESSION_ID")
+        if command in ("/status", "/watch"):
+            self.show_status(watch=command == "/watch")
+        elif command == "/run":
+            self.start(arg)
+        elif command == "/demo":
+            self.start("", demo=True)
+        elif command == "/resume":
+            self.attach(arg)
+            self.show_status()
+        elif command == "/project":
+            require(0 < len(arg) <= 100, "Enter a project name or ID after /project")
+            self.project, self.session = arg, None
+            self.terminal.write(f"Project set to {arg}. Enter a request to start a run.")
+        elif command == "/projects":
+            projects = self.backend.projects()
+            for project in projects:
+                self.terminal.write(f"{project['id']}  {project['name']}")
+            if not projects:
+                self.terminal.write("No projects yet.")
+        elif command == "/sessions":
+            require(self.project, "Select a project with /project NAME or ID")
+            sessions = self.backend.sessions(project_id(self.backend, self.project))
+            for session in sessions[:12]:
+                request = " ".join(session["prompt"].split())[:72]
+                self.terminal.write(f"{session['id']}  {session['state']:9}  {request}")
+            if not sessions:
+                self.terminal.write("No sessions yet.")
+        elif command == "/messages":
+            for message in self.backend.status(self.session)["messages"][-12:]:
+                tone = "mint" if message["speaker"] == "lead" else "lilac"
+                self.terminal.write(message["text"], label=f"{message['speaker'].title()} > ", tone=tone)
+        elif command == "/cancel":
+            self.backend.cancel(self.session)
+            self.terminal.write("Cancellation requested.")
+        elif command == "/retry":
+            self.backend.retry(self.session)
+            self.terminal.write(f"Queued {self.session} to retry.")
+        elif command == "/help":
+            self.terminal.write("""Enter a request to start a run. With a session selected, plain text asks the Lead.
+  /run REQUEST     Start a new run or change the requirements
+  /demo            Start the offline Fieldwork demo
+  /project NAME    Choose a project for your next run
+  /projects        List projects
+  /sessions        List recent sessions in the current project
+  /resume ID       Select a previous session for chat
+  /status /watch   Check the selected run or watch it finish
+  /messages        Read recent conversation and updates
+  /cancel /retry   Request cancellation or retry the selected run
+  /exit            Leave the terminal""")
+        else:
+            self.terminal.write("Unknown command. Enter /help for commands.")
+
+    def run(self):
+        readline_enabled = True
+        try:
+            import readline  # Enables native cursor movement and in-memory input history.
+        except ImportError:
+            readline_enabled = False
+        self.terminal.banner()
+        self.terminal.write("Ask the Lead about this run." if self.session else
+                            "Describe what you want to build, or enter /demo.")
+        if self.session:
+            self.show_status()
+        elif self.project:
+            self.terminal.write(f"Project  {self.project}")
+        while True:
+            try:
+                line = input(self.terminal.prompt(self.session is not None, readline=readline_enabled)).strip()
+                if not line:
+                    continue
+                if line.startswith("/"):
+                    command, *args = line.split(maxsplit=1)
+                    if command in ("/exit", "/quit"):
+                        return
+                    self.command(command, args[0] if args else "")
+                elif self.session:
+                    self.ask(line)
+                else:
+                    self.start(line)
+            except EOFError:
+                self.terminal.write()
+                return
+            except KeyboardInterrupt:
+                self.terminal.write("\nEnter /exit to leave or /cancel to stop the selected run.")
+            except (ValueError, OSError, RuntimeError, http.client.HTTPException, sqlite3.Error) as exc:
+                self.terminal.write(exc, label="Error: ", tone="coral")
 
 
 def progress(backend, sid):
@@ -257,7 +460,8 @@ def logs(backend, args):
             else:
                 actor = " / ".join(filter(None, (event["stage"], event["role"])))
                 excerpt = event["excerpt"].strip().replace("\n", " ")
-                print(f"{event['id']:>5}  {event['time']}  {actor}  {event['tool'] or event['kind']}  {excerpt}", flush=True)
+                action = " · ".join(filter(None, (event["tool"] or event["kind"], event.get("model"))))
+                print(f"{event['id']:>5}  {event['time']}  {actor}  {action}  {excerpt}", flush=True)
 
     show(reversed(page["events"]))
     if args.follow:
@@ -309,6 +513,42 @@ def prompt_credential():
 
 def run_action(args, backend):
     json_output = getattr(args, "json", False)
+    if args.command == "doctor":
+        result = backend.preflight(not args.local_only)
+        if json_output:
+            print(json.dumps(result, indent=2))
+        else:
+            for item in result["checks"]:
+                print(f"{item['status']:<7} {item['name']} · {item['detail']}")
+        return int(not result["ready"])
+    if args.command == "execution":
+        if args.pressure:
+            require(not args.apply, "Choose either applying settings or viewing pressure")
+            print(json.dumps(backend.pressure(), indent=2))
+            return 0
+        data = MISSING
+        if args.apply == "-":
+            data = json.loads(sys.stdin.read(40_001))
+        elif args.apply:
+            with Path(args.apply).open(encoding="utf-8") as source:
+                data = json.loads(source.read(40_001))
+        if data is not MISSING:
+            require(isinstance(data, dict), "Execution settings must be a JSON object")
+        policy = backend.execution_settings(data)
+        if json_output:
+            print(json.dumps(policy, indent=2))
+        else:
+            capacity = policy["capacity"]
+            if capacity:
+                print(f"Docker engine  {capacity['cpu']} CPU  {capacity['ram']} MiB")
+            else:
+                print("Docker unavailable. Showing reference sizes.")
+            print(f"Concurrent sessions  {policy['sessions']}")
+            print("Independent reviewers per gate  " + ("2" if policy["parallel_reviews"] else "1"))
+            for task, limits in policy["limits"].items():
+                sizing = "custom" if task in policy["overrides"] else "auto"
+                print(f"{task:<14} {limits['cpu']:g} CPU  {limits['ram']} MiB  {limits['pids']} processes  {sizing}")
+        return 0
     if args.command in ("models", "credential"):
         settings = initial_provider(require_model=False) if environment_provider() else backend.provider()
         if args.command == "models":
@@ -354,9 +594,8 @@ def run_action(args, backend):
                 print("No Skills or MCP servers configured.")
         return int(args.check and any(not server["ready"] for server in result["mcp"]))
     if args.command == "provider-test":
-        if isinstance(backend, RemoteWorkspace) and environment_provider():
-            settings = initial_provider()
-            backend.configure({**settings, "api_key": provider_key(settings["kind"])})
+        if isinstance(backend, RemoteWorkspace):
+            configure_environment_provider(backend)
         result = backend.provider_test()
         print(json.dumps(result) if json_output else f"Model responded via {result['kind']}  {result['model']}")
         return 0
@@ -388,9 +627,8 @@ def run_action(args, backend):
         require(args.demo or isinstance(prompt, str) and 0 < len(prompt.strip()) <= 16_000,
                 "Provide a request up to 16,000 characters or use --demo")
         require(args.demo or getattr(args, "project", None), "Specify --project for a custom request")
-        if not args.demo and environment_provider():
-            settings = initial_provider()
-            backend.configure({**settings, "api_key": provider_key(settings["kind"])})
+        if not args.demo:
+            configure_environment_provider(backend)
         project = project_id(backend, args.project or "Workshop demo", create=True)
         sid = backend.run(project, prompt, args.demo)
         if args.detach:
@@ -436,12 +674,17 @@ def parser_for_cli():
                         help="Connect to an explicit loopback RittaiHarness port")
     shared.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Machine-readable output")
     parser = argparse.ArgumentParser(prog="rittaiharness", description=__doc__, parents=[shared])
-    parser.add_argument("--port", type=int, default=8765, help=argparse.SUPPRESS)
+    parser.add_argument("--port", type=int, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     parser.add_argument("--doctor", action="store_true", help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command")
     options = {
+        "chat": "Open the interactive terminal workspace",
         "serve": "Start the dashboard and loopback API", "doctor": "Check Docker and the role images",
         "extensions": "List or check configured Skills and MCP tools",
+        "execution": "Show or apply task limits and parallel execution settings",
+        "backup": "Back up the stopped workspace database, Git history, and builds",
+        "restore": "Restore a backup into a new workspace directory",
+        "service": "Generate an optional systemd user service",
         "models": "List Foundry project deployments or model IDs from other providers",
         "credential": "Save or forget the provider credential in the system keyring",
         "provider-test": "Send a connectivity check to the configured model",
@@ -454,8 +697,27 @@ def parser_for_cli():
         command = commands.add_parser(name, help=explanation, parents=[shared])
         if name == "serve":
             command.add_argument("--port", type=int, default=argparse.SUPPRESS)
+        if name == "chat":
+            selection = command.add_mutually_exclusive_group()
+            selection.add_argument("--project", help="Project name or ID for new runs")
+            selection.add_argument("--session", metavar="SESSION_ID", help="Resume the conversation for a session")
+            command.add_argument("--no-animation", action="store_true", help="Show a static logo and plain wait messages")
         if name == "extensions":
             command.add_argument("--check", action="store_true", help="Connect and discover approved MCP tools")
+        if name == "execution":
+            command.add_argument("--apply", metavar="FILE", help="Apply execution settings from JSON or '-' for stdin")
+            command.add_argument("--pressure", action="store_true", help="Show Docker usage and workspace reservations")
+        if name == "doctor":
+            command.add_argument("--full", action="store_true", help="Probe workspace mounts, caches, and the model provider")
+            command.add_argument("--local-only", action="store_true", help="Skip the model request during full preflight")
+        if name == "backup":
+            command.add_argument("output", type=Path, help="New backup ZIP path")
+        if name == "restore":
+            command.add_argument("archive", type=Path, help="Backup ZIP to restore")
+        if name == "service":
+            command.add_argument("--write", type=Path, help="Write to a new unit file")
+            command.add_argument("--docker-context", default=os.environ.get("DOCKER_CONTEXT"), help="Pin the Docker context in the unit")
+            command.add_argument("--port", type=int, default=argparse.SUPPRESS)
         if name == "credential":
             command.add_argument("action", choices=("save", "forget"))
             command.add_argument("--from-env", action="store_true", help="Save an existing provider environment credential")
@@ -485,18 +747,43 @@ def main(argv=None):
     parser = parser_for_cli()
     args = parser.parse_args(argv)
     args.data = getattr(args, "data", Path(os.environ.get("OMNI_DATA", ".omni-data"))).resolve()
+    if (args.command is None and not hasattr(args, "port") and not getattr(args, "json", False)
+            and sys.stdin.isatty() and sys.stdout.isatty()):
+        args.command, args.project, args.session, args.no_animation = "chat", None, None, False
+    port = getattr(args, "port", 8765)
     try:
-        if args.command == "doctor" or args.doctor:
+        if args.doctor or args.command == "doctor" and not args.full:
             Docker().doctor()
             print("Docker and RittaiHarness images are ready.")
             return
         if args.command in (None, "serve"):
-            serve(["--port", str(args.port), "--data", str(args.data)])
+            serve(["--port", str(port), "--data", str(args.data)])
+            return
+        if args.command == "backup":
+            require((args.data / DATABASE).is_file(), "The workspace database does not exist")
+            with workspace_lock(args.data):
+                path = backup_workspace(args.data, args.output.absolute())
+            print(path)
+            return
+        if args.command == "restore":
+            print(restore_workspace(args.archive.resolve(strict=True), args.data))
+            return
+        if args.command == "service":
+            content = user_service(sys.argv[0], args.data, port, args.docker_context)
+            if args.write:
+                with args.write.open("x", encoding="utf-8") as unit:
+                    unit.write(content)
+                print(args.write.absolute())
+            else:
+                print(content, end="")
             return
         with workspace(args) as backend:
+            if args.command == "chat":
+                ChatShell(backend, args).run()
+                return
             result = run_action(args, backend)
         raise SystemExit(result)
     except KeyboardInterrupt:
         raise SystemExit(130)
-    except (ValueError, OSError, RuntimeError, http.client.HTTPException) as exc:
+    except (ValueError, OSError, RuntimeError, http.client.HTTPException, sqlite3.Error, BadZipFile) as exc:
         parser.exit(1, f"rittaiharness: {exc}\n")

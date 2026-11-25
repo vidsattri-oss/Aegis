@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_session ON events(session_id, id);
 CREATE TABLE IF NOT EXISTS messages (
  id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
- speaker TEXT NOT NULL, text TEXT NOT NULL, created TEXT NOT NULL
+ speaker TEXT NOT NULL, text TEXT NOT NULL, created TEXT NOT NULL,
+ reply_to INTEGER REFERENCES messages(id)
 );
 CREATE TABLE IF NOT EXISTS gates (
  session_id TEXT NOT NULL REFERENCES sessions(id), stage TEXT NOT NULL, state TEXT NOT NULL,
@@ -105,6 +106,9 @@ CREATE TABLE IF NOT EXISTS memory_usage (
  node_id TEXT REFERENCES memory_nodes(id) ON DELETE CASCADE, session_id TEXT REFERENCES sessions(id),
  stage TEXT NOT NULL, PRIMARY KEY(node_id, session_id, stage)
 );
+CREATE TABLE IF NOT EXISTS dream_runs (
+ id INTEGER PRIMARY KEY, at TEXT NOT NULL, pruned INTEGER NOT NULL, synthesized INTEGER NOT NULL
+);
 """
 
 JSON_COLUMNS = {"provider", "plan", "profile", "input", "trace", "payload", "artifact", "details"}
@@ -126,6 +130,13 @@ class Store:
         with self.db() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
+            db.execute("BEGIN IMMEDIATE")
+            if "reply_to" not in {column["name"] for column in db.execute("PRAGMA table_info(messages)")}:
+                db.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER REFERENCES messages(id)")
+            db.execute("CREATE INDEX IF NOT EXISTS messages_reply ON messages(session_id, reply_to)")
+            db.execute("""INSERT INTO dream_runs(at,pruned,synthesized)
+                SELECT json_extract(value,'$.at'),json_extract(value,'$.pruned'),json_extract(value,'$.synthesized')
+                FROM settings WHERE key='last_dream' AND NOT EXISTS(SELECT 1 FROM dream_runs)""")
         os.chmod(self.file, 0o600)
 
     @contextmanager
@@ -234,8 +245,20 @@ class Store:
             excerpt = next((item for item in (output, payload.get("message"), error, payload.get("event"),
                                               payload.get("status"), payload.get("commit"), payload.get("url"))
                             if isinstance(item, str) and item), "")
-            events.append({**row, "tool": payload.get("tool"), "excerpt": excerpt[:650]})
+            events.append({**row, "tool": payload.get("tool"), "model": payload.get("model"), "excerpt": excerpt[:650]})
         return {"events": events, "before": events[-1]["id"] if after is None and len(scoped) > limit else None}
+
+    def release(self, session_id, commit, build, preview):
+        stamp = now()
+        event = encode(self.redact({"commit": commit, "build": build, "preview": preview}))
+        with self.db() as db:
+            db.execute("UPDATE sessions SET state='completed',bundle=?,preview=?,updated=? WHERE id=?",
+                       (build, preview, stamp, session_id))
+            db.execute("INSERT INTO events (session_id,time,kind,payload) VALUES (?,?,'released',?)",
+                       (session_id, stamp, event))
+            db.execute("INSERT INTO messages (session_id,speaker,text,created) VALUES (?,'lead',?,?)",
+                       (session_id, "All six stages passed. The reviewed changes are merged and the build "
+                        "is available in Live Output.", stamp))
 
     def cancel(self, session_id):
         with self.db() as db:
@@ -248,9 +271,19 @@ class Store:
                            (session_id, "lead", "Cancellation requested. I’ll stop at the next safe boundary.", stamp))
             return bool(changed)
 
-    def message(self, session_id, speaker, text):
-        self.write("INSERT INTO messages (session_id,speaker,text,created) VALUES (?,?,?,?)",
-                   (session_id, speaker, self.redact(text), now()))
+    def message(self, session_id, speaker, text, *, reply_to=None):
+        with self.db() as db:
+            return db.execute("INSERT INTO messages (session_id,speaker,text,created,reply_to) VALUES (?,?,?,?,?)",
+                              (session_id, speaker, self.redact(text), now(), reply_to)).lastrowid
+
+    def chat_reply(self, session_id, message_id):
+        return self.row("SELECT text FROM messages WHERE session_id=? AND reply_to=?", (session_id, message_id))
+
+    def chat_history(self, session_id, before):
+        return self.rows("""SELECT question.text AS question, answer.text AS answer FROM messages AS answer
+                          JOIN messages AS question ON question.id=answer.reply_to
+                          WHERE answer.session_id=? AND question.id<? ORDER BY question.id DESC LIMIT 4""",
+                         (session_id, before))
 
     def update(self, session_id, **changes):
         changes["updated"] = now()
@@ -367,6 +400,7 @@ class Store:
                 FROM memory_nodes a,memory_nodes b WHERE a.id=source AND b.id=target))
                 WHERE kind='resolved_by'""")
             result = {"at": now(), "pruned": count, "synthesized": synthesized}
+            db.execute("INSERT INTO dream_runs(at,pruned,synthesized) VALUES (?,?,?)", (result["at"], count, synthesized))
             db.execute("INSERT INTO settings VALUES ('last_dream',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                        (encode(result),))
         return result
@@ -377,3 +411,20 @@ class Store:
                 "links": self.row("SELECT COUNT(*) AS count FROM memory_edges")["count"],
                 "applications": self.row("SELECT COUNT(*) AS count FROM memory_usage")["count"],
                 "last_dream": self.setting("last_dream")}
+
+    def dream_history(self, page):
+        rows = self.rows("SELECT at,pruned,synthesized FROM dream_runs ORDER BY id DESC LIMIT 26 OFFSET ?", (page * 25,))
+        return {"history": rows[:25], "more": len(rows) > 25}
+
+    def memory_browser(self, query, page):
+        records = self.rows("""SELECT n.id,n.kind,n.label,n.body,n.weight,n.last_used,
+            (SELECT GROUP_CONCAT(p.name, ', ') FROM memory_projects m JOIN projects p ON p.id=m.project_id
+             WHERE m.node_id=n.id) AS projects,
+            (SELECT COUNT(*) FROM memory_usage u WHERE u.node_id=n.id) AS uses
+            FROM memory_nodes n WHERE instr(lower(n.label || ' ' || n.body || ' ' || n.kind),lower(?)) > 0
+            ORDER BY n.last_used DESC,n.id LIMIT 26 OFFSET ?""", (query, page * 25))
+        for item in records[:25]:
+            item["links"] = self.rows("""SELECT e.kind,n.label FROM memory_edges e JOIN memory_nodes n
+                ON n.id=CASE WHEN e.source=? THEN e.target ELSE e.source END
+                WHERE e.source=? OR e.target=? ORDER BY e.weight DESC,n.label LIMIT 12""", (item["id"],) * 3)
+        return {"records": records[:25], "more": len(records) > 25}

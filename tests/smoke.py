@@ -8,6 +8,7 @@ from zipfile import ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from omni import demo
 from omni.engine import Lead, TERMINAL
 from omni.sandbox import Docker
 
@@ -30,9 +31,11 @@ def main():
                 raise AssertionError(f"{session['stage']} ended with {session['state']}: {session['error']}")
             assert len(lead.store.summary(sid)["gates"]) == 7
             with urlopen(session["preview"], timeout=15) as response:
-                assert b"Workshop task board" in response.read()
+                assert demo.TITLE.encode() in response.read()
+            with urlopen(session["preview"] + "/panorama.css", timeout=15) as response:
+                assert b"data:image/webp;base64," in response.read()
             with ZipFile(session["bundle"]) as archive:
-                assert archive.testzip() is None and "index.html" in archive.namelist()
+                assert archive.testzip() is None and set(demo.FILES) <= set(archive.namelist())
             print("Lead plan, all six stage gates, live preview and build ZIP passed.")
         finally:
             lead.close()

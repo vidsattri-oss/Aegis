@@ -12,7 +12,9 @@ build: check
 check:
 	$(PYTHON) -m compileall -q omni containers tests
 	$(NODE) --check omni/web/app.js
+	$(NODE) --check omni/web/workspace-tools.js
 	$(NODE) --check omni/web/session.js
+	$(NODE) --check omni/sample/app.js
 
 test: check
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
@@ -23,7 +25,7 @@ image-worker image-qa image-runtime: image-%:
 	$(DOCKER) build --file containers/Dockerfile --target $* --tag rittaiharness-$*:local .
 
 run:
-	$(PYTHON) -m omni
+	$(PYTHON) -m omni serve
 
 doctor:
 	$(PYTHON) -m omni --doctor

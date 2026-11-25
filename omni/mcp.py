@@ -3,13 +3,15 @@ import contextlib
 import http.client
 import json
 import os
+import secrets
 import signal
 import subprocess
 import time
 from urllib.parse import urlsplit
 
 from .contracts import require
-from .sandbox import RoleChannel
+from .integrations import public_socket
+from .sandbox import Docker, RoleChannel
 
 VERSION = "2025-11-25"
 VERSIONS = {VERSION, "2025-06-18", "2025-03-26", "2024-11-05"}
@@ -24,10 +26,21 @@ def remaining(deadline):
 
 
 class Stdio:
-    def __init__(self, config, credentials):
-        env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT") if key in os.environ}
-        env.update(credentials)
-        self.process = subprocess.Popen(config["command"], cwd=config["cwd"], env=env, start_new_session=True,
+    def __init__(self, config, credentials, docker=None, workspace=None, resources=None):
+        sandboxed = config.get("isolation") != "host"
+        self.docker = (docker or Docker()) if sandboxed else None
+        self.container = "rittaiharness-mcp-" + secrets.token_hex(8) if sandboxed else None
+        if sandboxed:
+            args = self.docker.args(self.container, workspace or self.container, "mcp", source=config["cwd"],
+                                    resources=resources, caches=False)
+            command = [*args[:-1], "--workdir=/input", args[-1], *config["command"]]
+            options = {}
+        else:
+            env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT") if key in os.environ}
+            env.update(credentials)
+            command = config["command"]
+            options = {"cwd": config["cwd"], "env": env}
+        self.process = subprocess.Popen(command, **options, start_new_session=True,
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                         bufsize=0)
         self.pipe = RoleChannel(self.process, limit=LIMIT)
@@ -39,6 +52,13 @@ class Stdio:
                 yield json.loads(self.pipe.read(deadline))
 
     def close(self):
+        try:
+            self.close_process()
+        finally:
+            if self.docker:
+                self.docker.remove(self.container)
+
+    def close_process(self):
         self.process.stdin.close()
         try:
             self.process.wait(timeout=0.5)
@@ -60,6 +80,9 @@ class StreamableHTTP:
         self.headers = {"Accept": "application/json, text/event-stream", "Accept-Encoding": "identity"}
         if token := config.get("token_env"):
             self.headers["Authorization"] = "Bearer " + credentials[token]
+        if token := credentials.get("oauth_access_token"):
+            self.headers["Authorization"] = "Bearer " + token
+        self.oauth = "oauth" in config
         if api_key := config.get("api_key_env"):
             self.headers[config["key_header"]] = credentials[api_key]
         self.session_id = None
@@ -79,6 +102,8 @@ class StreamableHTTP:
         url = self.location
         connection = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
         with contextlib.closing(connection(url.hostname, url.port, timeout=remaining(deadline))) as client:
+            if self.oauth:
+                client._create_connection = public_socket
             client.connect()
             sock = client.sock
             sock.settimeout(remaining(deadline))
@@ -133,8 +158,9 @@ class StreamableHTTP:
 
 
 class Client:
-    def __init__(self, config, credentials):
-        self.transport = StreamableHTTP(config, credentials) if "url" in config else Stdio(config, credentials)
+    def __init__(self, config, credentials, *, docker=None, workspace=None, resources=None):
+        self.transport = (StreamableHTTP(config, credentials) if "url" in config
+                          else Stdio(config, credentials, docker, workspace, resources))
         self.sequence = 0
 
     def exchange(self, method, params, deadline, *, notify=False):

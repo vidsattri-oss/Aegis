@@ -3,13 +3,16 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import test_workspace
+from omni import demo
 from omni.cli import main
+from omni.contracts import PERSONAS
 from omni.credentials import ProviderCredentials
-from omni.engine import discover_models
+from omni.engine import Lead, discover_models
 from omni.integrations import complete, list_provider_models, provider_settings
 from omni.store import Store
 
@@ -56,8 +59,9 @@ class ProviderModelsTest(unittest.TestCase):
                     self.assertTrue(all(call.kwargs["headers"] == headers for call in request.call_args_list))
                     self.assertEqual([model["id"] for model in result["models"]], ["team-chat", "team-reasoning"])
                     self.assertFalse(credentials.status(settings)["has_key"])
+            self.assertEqual(provider_settings(settings)["model"], "")
             with self.assertRaisesRegex(ValueError, "Deployment or model is required"):
-                provider_settings(settings)
+                provider_settings({"kind": "foundry", "endpoint": FOUNDRY_RESOURCE})
             response_chat = b'{"choices":[{"message":{"content":"OK"}}]}'
             with patch("omni.integrations.request", return_value=(response_chat, "application/json")) as request:
                 complete({**settings, "model": result["models"][0]["id"]}, "fixture-provider-secret", "Test", {}, 5)
@@ -87,6 +91,49 @@ class ProviderModelsTest(unittest.TestCase):
             self.assertEqual(exit_status.exception.code, 0)
         self.assertEqual(request.call_args.args[0], DEPLOYMENTS)
         self.assertEqual(stdout.getvalue(), "team-chat\n")
+
+    def test_foundry_pool_routes_factory_agents_without_a_default_deployment(self):
+        calls = []
+
+        def model(settings, key, persona, data, timeout):
+            self.assertEqual(key, "workspace-foundry-key")
+            role = next(role for role, instruction in PERSONAS.items() if persona.startswith(instruction))
+            calls.append((role, settings["model"]))
+            if role == "review":
+                value = {"passed": True, "checks": ["Verified the contract."], "feedback": "Accepted."}
+            elif "Propose the next high-value evidence" in persona:
+                value = {"done": bool(data["evidence"]), "urls": [] if data["evidence"] else [demo.SOURCE], "packages": []}
+            else:
+                value = demo.EXAMPLES[data["stage"]]
+            return json.dumps(value), (3, 2)
+
+        models = {"value": [
+            {"type": "ModelDeployment", "name": "chat-a", "capabilities": {"chatCompletion": "true"}},
+            {"type": "ModelDeployment", "name": "chat-b", "capabilities": {"chat_completion": True}},
+            {"type": "ModelDeployment", "name": "vectors", "capabilities": {"embeddings": "true"}},
+        ]}
+        with tempfile.TemporaryDirectory() as directory, closing(Lead(
+            directory, docker=test_workspace.DockerFixture(), model=model, scan=lambda *_: [],
+            fetch=lambda *args: {"url": args[0], "excerpt": "Verified source fixture."}, keyring=KeyringFixture()
+        )) as lead:
+            with patch("omni.integrations.request", return_value=(json.dumps(models).encode(), "application/json")):
+                settings = lead.configure({"kind": "foundry", "endpoint": FOUNDRY_PROJECT, "api_key": "workspace-foundry-key",
+                                           "role_models": {"development": "chat-b", "review": "chat-a"}})
+                with self.assertRaisesRegex(ValueError, "missing from the project's chat deployments"):
+                    lead.configure({"kind": "foundry", "endpoint": FOUNDRY_PROJECT, "role_models": {"lead": "vectors"}})
+            self.assertEqual(settings["model"], "")
+            self.assertEqual([(item["id"], item["chat"]) for item in settings["deployments"]],
+                             [("chat-a", True), ("chat-b", True), ("vectors", False)])
+            project = lead.store.project("Foundry pool", "")
+            sid = lead.launch(project["id"], demo.PROMPT)
+            result = test_workspace.WorkspaceTest.completed(lead, sid)
+            self.assertEqual(result["state"], "completed", result["error"])
+            self.assertEqual({alias for _, alias in calls}, {"chat-a", "chat-b"})
+            self.assertEqual(dict(calls)["development"], "chat-b")
+            self.assertEqual(dict(calls)["review"], "chat-a")
+            logs = lead.store.telemetry(sid, role="development")["events"]
+            self.assertTrue(any(event["tool"] == "model.chat" and event["model"] == "chat-b" for event in logs))
+            self.assertNotIn("workspace-foundry-key", repr(result))
 
     def test_saved_credentials_survive_restart_and_are_scoped_by_endpoint(self):
         provider = provider_settings({"kind": "compatible", "endpoint": "https://model.example/v1", "model": "alias"})

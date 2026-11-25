@@ -97,8 +97,7 @@ def provider_settings(raw, *, require_model=True):
     if kind != "demo":
         url, model = raw.get("endpoint"), raw.get("model") or ""
         require(isinstance(url, str) and 0 < len(url) <= 500, "Provider endpoint is required")
-        require(isinstance(model, str) and len(model.strip()) <= 160 and (model.strip() or not require_model),
-                "Deployment or model is required")
+        require(isinstance(model, str) and len(model.strip()) <= 160, "Invalid deployment or model name")
         parsed = urlsplit(url)
         require(parsed.hostname and not any((parsed.username, parsed.password, parsed.query, parsed.fragment))
                 and (parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in
@@ -119,6 +118,8 @@ def provider_settings(raw, *, require_model=True):
                 base_url += "/openai/v1"
             require(base_url.endswith("/openai/v1") and parsed.scheme == "https", "Use a Foundry resource or project endpoint")
         settings.update(endpoint=base_url, model=model.strip())
+        require(settings["model"] or not require_model or foundry_project_endpoint(settings),
+                "Deployment or model is required")
     for key in ("input_rate", "output_rate", "compute_rate"):
         value = raw.get(key, 0)
         require(type(value) in (int, float) and 0 <= value <= 10_000, f"Invalid {key}")
@@ -136,10 +137,31 @@ def provider_headers(settings, key):
     return {"Authorization": f"Bearer {key}"}
 
 
+def foundry_project_endpoint(settings):
+    if settings["kind"] == "foundry":
+        project = settings["endpoint"].removesuffix("/openai/v1")
+        if re.fullmatch(r"/api/projects/[A-Za-z0-9_-]+", urlsplit(project).path):
+            return project
+    return None
+
+
+def foundry_chat_support(deployment):
+    capabilities = deployment.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return None
+    flags = {re.sub(r"[^a-z]", "", name.lower()): str(value).lower() for name, value in capabilities.items()}
+    chat = flags.get("chatcompletion")
+    if chat in ("true", "false"):
+        return chat == "true"
+    if any(flags.get(name) == "true" for name in ("embeddings", "imagegeneration", "texttospeech", "speechrecognition")):
+        return False
+    return None
+
+
 def foundry_deployments(settings, key):
-    project = settings["endpoint"].removesuffix("/openai/v1")
-    require(re.fullmatch(r"/api/projects/[A-Za-z0-9_-]+", urlsplit(project).path),
-            "Paste the Foundry project endpoint ending in /api/projects/<project> to load deployments")
+    project = foundry_project_endpoint(settings)
+    require(project,
+            "Paste the Foundry project endpoint from your project's Home page. It ends in /api/projects/<project>.")
     require(key, "Enter a Foundry project API key or Microsoft Entra access token to load deployments")
     # Entra access tokens use compact JWT format. Foundry project API keys use the api-key header.
     headers = {"Authorization": f"Bearer {key}"} if key.startswith("eyJ") and key.count(".") in (2, 4) else {"api-key": key}
@@ -165,7 +187,8 @@ def foundry_deployments(settings, key):
             name = deployment.get("name")
             if isinstance(name, str) and 0 < len(name) <= 160 and name.isprintable() and name.strip() == name:
                 publisher = deployment.get("modelPublisher")
-                deployments[name] = {"id": name, "owned_by": publisher[:160] if isinstance(publisher, str) else ""}
+                deployments[name] = {"id": name, "owned_by": publisher[:160] if isinstance(publisher, str) else "",
+                                     "chat": foundry_chat_support(deployment)}
         next_link = response.get("nextLink")
         if next_link is None:
             return [deployments[name] for name in sorted(deployments, key=str.casefold)]
