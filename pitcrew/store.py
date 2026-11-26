@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from .contracts import require
+from .usage import usd_amount
+
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -57,7 +60,7 @@ class Redactor:
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, created TEXT NOT NULL,
- github_url TEXT, github_branch TEXT
+ github_url TEXT, github_branch TEXT, budget_usd REAL, budget_hold TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), prompt TEXT NOT NULL,
@@ -72,7 +75,9 @@ CREATE TABLE IF NOT EXISTS attempts (
  role TEXT NOT NULL, number INTEGER NOT NULL, status TEXT NOT NULL, profile TEXT NOT NULL,
  started TEXT NOT NULL, ended TEXT, persona TEXT NOT NULL, input TEXT NOT NULL, trace TEXT,
  input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
- model_cost REAL NOT NULL DEFAULT 0, compute_cost REAL NOT NULL DEFAULT 0
+ model_cost REAL NOT NULL DEFAULT 0, compute_cost REAL NOT NULL DEFAULT 0,
+ vendor_cost REAL NOT NULL DEFAULT 0, vendor_estimate_cost REAL NOT NULL DEFAULT 0,
+ unpriced_calls INTEGER NOT NULL DEFAULT 0, metering_pending INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session_id, started);
 CREATE TABLE IF NOT EXISTS events (
@@ -144,12 +149,19 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             if "reply_to" not in {column["name"] for column in db.execute("PRAGMA table_info(messages)")}:
                 db.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER REFERENCES messages(id)")
-            for table, fields in (("projects", ("github_url", "github_branch")),
+            for table, fields in (("projects", ("github_url", "github_branch", "budget_hold")),
                                   ("sessions", ("github_base", "github_commit", "github_published"))):
                 columns = {column["name"] for column in db.execute(f"PRAGMA table_info({table})")}
                 for field in fields:
                     if field not in columns:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {field} TEXT")
+            if "budget_usd" not in {column["name"] for column in db.execute("PRAGMA table_info(projects)")}:
+                db.execute("ALTER TABLE projects ADD COLUMN budget_usd REAL")
+            attempt_columns = {column["name"] for column in db.execute("PRAGMA table_info(attempts)")}
+            for column, kind in (("vendor_cost", "REAL"), ("vendor_estimate_cost", "REAL"),
+                                 ("unpriced_calls", "INTEGER"), ("metering_pending", "INTEGER")):
+                if column not in attempt_columns:
+                    db.execute(f"ALTER TABLE attempts ADD COLUMN {column} {kind} NOT NULL DEFAULT 0")
             db.execute("CREATE INDEX IF NOT EXISTS messages_reply ON messages(session_id, reply_to)")
             db.execute("""INSERT INTO dream_runs(at,pruned,synthesized)
                 SELECT json_extract(value,'$.at'),json_extract(value,'$.pruned'),json_extract(value,'$.synthesized')
@@ -213,6 +225,46 @@ class Store:
             FROM projects p LEFT JOIN sessions s ON s.project_id=p.id
             LEFT JOIN attempts a ON a.session_id=s.id GROUP BY p.id ORDER BY p.created DESC
         """)
+
+    def budget(self, project_id):
+        result = self.row("""SELECT p.budget_usd,p.budget_hold,ROUND(COALESCE(SUM(a.model_cost),0),8) AS model_cost,
+            ROUND(COALESCE(SUM(a.vendor_cost),0),8) AS vendor_cost,
+            ROUND(COALESCE(SUM(a.vendor_estimate_cost),0),8) AS vendor_estimate_cost,
+            COALESCE(SUM(a.unpriced_calls),0) AS unpriced_calls
+            FROM projects p LEFT JOIN sessions s ON s.project_id=p.id
+            LEFT JOIN attempts a ON a.session_id=s.id WHERE p.id=? GROUP BY p.id""", (project_id,))
+        if result is not None:
+            limit, spend = result["budget_usd"], result["model_cost"]
+            result["remaining_usd"] = None if limit is None else round(max(0, limit - spend), 8)
+            result["reached"] = limit is not None and spend >= limit
+        return result
+
+    def set_budget(self, project_id, limit):
+        require(limit is None or usd_amount(limit) is not None and limit == round(limit, 2),
+                "Enter a USD budget from 0 to 1,000,000 with up to two decimal places")
+        require(self.write("UPDATE projects SET budget_usd=?,budget_hold=NULL WHERE id=?", (limit, project_id)),
+                "RaceDay does not exist")
+        return self.budget(project_id)
+
+    def reconcile_model_usage(self, db):
+        reason = "A model request was interrupted before its charge was recorded. Review the vendor usage and save the RaceDay budget before resuming."
+        db.execute("""UPDATE projects SET budget_hold=? WHERE budget_usd IS NOT NULL AND id IN (
+                      SELECT s.project_id FROM sessions s JOIN attempts a ON a.session_id=s.id
+                      WHERE a.metering_pending=1)""", (reason,))
+        db.execute("UPDATE attempts SET metering_pending=0,unpriced_calls=unpriced_calls+1 WHERE metering_pending=1")
+
+    def record_model_usage(self, attempt, usage, amount, source, hold=None):
+        with self.db() as db:
+            db.execute("""UPDATE attempts SET input_tokens=input_tokens+?,output_tokens=output_tokens+?,
+                       model_cost=model_cost+?,vendor_cost=vendor_cost+?,vendor_estimate_cost=vendor_estimate_cost+?,
+                       unpriced_calls=unpriced_calls+?,metering_pending=0 WHERE id=?""",
+                       (*usage, amount, amount if source == "vendor_charge" else 0,
+                        amount if source in ("vendor_estimate", "azure_retail") else 0, source == "unpriced", attempt))
+            if hold:
+                return db.execute("""UPDATE projects SET budget_hold=? WHERE budget_usd IS NOT NULL AND id=(
+                                  SELECT s.project_id FROM sessions s JOIN attempts a ON a.session_id=s.id WHERE a.id=?)""",
+                                  (hold, attempt)).rowcount > 0
+        return False
 
     def session(self, project_id, prompt, provider):
         session_id = uid()
@@ -327,7 +379,8 @@ class Store:
         if not session:
             return None
         session["agents"] = self.rows("""SELECT id,stage,role,number,status,profile,started,ended,
-            input_tokens,output_tokens,model_cost,compute_cost FROM attempts WHERE session_id=? ORDER BY started,rowid""",
+            input_tokens,output_tokens,model_cost,compute_cost,vendor_cost,vendor_estimate_cost,unpriced_calls
+            FROM attempts WHERE session_id=? ORDER BY started,rowid""",
             (session_id,))
         stages = self.rows("SELECT * FROM gates WHERE session_id=? ORDER BY rowid", (session_id,))
         for gate in stages:

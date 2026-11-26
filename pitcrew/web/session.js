@@ -348,8 +348,10 @@ function sessionPage(session) {
   const active = ["queued", "running"].includes(session.state);
   return [heading(limit(session.plan?.summary || session.prompt, 95), "Lap " + session.id.slice(0, 8),
     actions(badge(session.state), active ? button("Cancel", control("cancel"), "quiet danger")
+      : session.state === "budget_paused" ? button("Resume lap", control("retry"), "quiet")
       : ["failed", "cancelled"].includes(session.state) && button("Retry", control("retry"), "quiet"),
       !active && button("New lap", () => startSession(session.project_id), "quiet")), "session-heading"),
+    session.state === "budget_paused" && node("p", { class: "notice", role: "status" }, session.error),
     node("section", { class: "inspection", "aria-label": "Lap views" }, tabs,
       node("div", { id: "session-panel", class: "tab-content" + (state.tab === "map" ? " map-panel" : ""),
         role: "tabpanel", "aria-labelledby": "tab-" + state.tab }, panels[state.tab](session)))];

@@ -6,7 +6,8 @@ const stages = [["research", "Strategy"], ["architecture", "Technical Design"], 
 const names = { ...Object.fromEntries(stages), lead: "Race Engineer", development: "Build Crew",
   qa: "Test Engineer", deploy: "Trackside Ops", review: "Scrutineers", specialist: "Specialists" };
 const labels = { queued: "Queued", running: "Running", retrying: "Retried", completed: "Healthy",
-  failed: "Failed", cancelled: "Cancelled", passed: "Passed", ready: "Ready", pending: "Pending" };
+  failed: "Failed", cancelled: "Cancelled", budget_paused: "Budget paused", paused: "Paused",
+  passed: "Passed", ready: "Ready", pending: "Pending" };
 const state = { workspace: null, project: null, session: null, route: "", tab: "map",
   engine: null, csrf: "", refreshing: false, toast: null, scope: {}, telemetry: null, signature: "" };
 const tabNames = [["map", "Crew & Pit Lane"], ["summary", "Lap Debrief"], ["output", "Parc Fermé"]];
@@ -154,7 +155,7 @@ function setupTermHelp() {
 function badge(value, text) {
   const normalized = String(value || "pending").toLowerCase();
   const type = ["success", "completed", "passed", "ready"].includes(normalized) ? "good"
-    : normalized === "failed" ? "error" : ["retrying", "retried", "cancelled"].includes(normalized) ? "warn"
+    : normalized === "failed" ? "error" : ["retrying", "retried", "cancelled", "budget_paused", "paused"].includes(normalized) ? "warn"
       : ["running", "queued"].includes(normalized) ? "active" : "";
   return node("span", { class: "badge " + type }, text || labels[normalized] || value || "Idle");
 }
@@ -621,9 +622,51 @@ function workspacePage() {
     muted(memory.last_dream ? "Last consolidated " + timestamp(memory.last_dream.at) : "The crew consolidates its notes between laps."))];
 }
 
+function editBudget(project, budget) {
+  formDialog("Model budget", [
+    field("RaceDay limit in USD", node("input", { name: "budget_usd", type: "number", min: 0, max: 1000000, step: 0.01,
+      value: budget.budget_usd ?? "" })),
+    muted("Leave blank for unlimited spending. Set zero to stop new model requests. Work already sent to the provider can still incur a charge."),
+  ], "Save budget", async ({ budget_usd }) => {
+    await api(`/api/projects/${project.id}/budget`, { budget_usd: budget_usd === "" ? null : Number(budget_usd) });
+    await refresh(true);
+  });
+}
+
+function editAzureRates(provider) {
+  const deployments = (provider.deployments || []).filter(({ chat }) => chat !== false).map(({ id }) => id);
+  const models = [...new Set([provider.model, ...deployments].filter(Boolean))];
+  const model = node("select", { name: "model", required: true }, models.map((name) => node("option", { value: name }, name)));
+  const current = muted();
+  const show = () => {
+    const rates = provider.model_rates?.[model.value];
+    current.textContent = rates ? `${money(rates.input_rate)} input / ${money(rates.output_rate)} output per 1M tokens · ${rates.region}`
+      : "No Azure retail rates imported for this deployment.";
+  };
+  model.addEventListener("change", show);
+  show();
+  formDialog("Azure model rates", [
+    field("Deployment or model alias", model), current,
+    field("Azure region code", node("input", { name: "region", placeholder: "eastus" })),
+    field("Uncached input token meter ID", node("input", { name: "input_meter" })),
+    field("Output token meter ID", node("input", { name: "output_meter" })),
+    muted("Choose meters for the deployed model and SKU. Pit Crew reads public Azure retail prices in USD."),
+    node("label", { class: "checkbox" }, node("input", { name: "clear", type: "checkbox" }), " Clear saved rates for this deployment"),
+  ], "Save pricing", async ({ model, region, input_meter, output_meter, clear }) => {
+    const { rates } = await api("/api/provider/azure-prices", {
+      model, region: region.trim().toLowerCase(), input_meter: input_meter.trim(), output_meter: output_meter.trim(), clear: Boolean(clear),
+    });
+    notify(rates ? `Azure rates saved for ${model}.` : `Imported rates cleared for ${model}.`);
+    await refresh(true);
+  });
+}
+
 function projectPage() {
-  const { project, sessions } = state.project;
+  const { project, sessions, budget } = state.project;
   const vitals = state.workspace.projects.find((item) => item.id === project.id);
+  const provider = state.workspace.provider;
+  const azurePrices = budget && ["foundry", "azure-gateway"].includes(provider.kind)
+    && (provider.model || provider.deployments?.length);
   return [heading(project.name, project.description, actions(!project.github_url &&
     button("Start practice run", () => startSession(project.id, true), "quiet", "practice-run"),
     button("+ New lap", () => startSession(project.id), "primary"))),
@@ -631,13 +674,26 @@ function projectPage() {
       node("a", { href: project.github_url, target: "_blank", rel: "noopener noreferrer" }, project.github_url.replace(/\.git$/, "")),
       project.github_branch && " · " + project.github_branch),
     state.engine && !state.engine.ready && node("p", { class: "notice" }, state.engine.detail),
-    sectionHeading("RaceDay overview"),
+    sectionHeading("RaceDay overview", actions(budget && button("Model budget", () => editBudget(project, budget), "quiet"),
+      azurePrices && button("Azure model rates", () => editAzureRates(provider), "quiet"))),
     node("div", { class: "metric-grid" },
       metric("Laps", number.format(vitals.session_count)),
       metric("Estimated spend", money(vitals.model_cost + vitals.compute_cost),
         money(vitals.model_cost) + " model · " + money(vitals.compute_cost) + " compute"),
       metric("Active crew", number.format(vitals.active_agents), number.format(vitals.failed_agents) + " failed attempts"),
       metric("Build health", labels[vitals.health] || "Idle", number.format(vitals.tokens) + " total tokens")),
+    budget && node("section", { class: "panel", "aria-label": "RaceDay model budget" },
+      facts([
+        ["Model spend", money(budget.model_cost)],
+        ["Vendor charges", money(budget.vendor_cost)],
+        ["Vendor estimates", money(budget.vendor_estimate_cost)],
+        ["Estimated from token rates", money(Math.max(0, budget.model_cost - budget.vendor_cost - budget.vendor_estimate_cost))],
+        ["Budget", budget.budget_usd === null ? "Unlimited" : money(budget.budget_usd)],
+        ["Remaining", budget.remaining_usd === null ? "—" : money(budget.remaining_usd)],
+      ]),
+      budget.unpriced_calls > 0 && muted(`${number.format(budget.unpriced_calls)} model calls lacked complete pricing data.`),
+      (budget.reached || budget.budget_hold) && node("p", { class: "notice" }, budget.budget_hold ||
+        "Model budget reached. Update the budget before resuming a paused Lap.")),
     sectionHeading("Laps", null, "lap"),
     sessions.length ? node("div", { class: "session-list" }, sessions.map((session) =>
       node("a", { class: "session-row", href: sessionURL(project.id, session.id) },

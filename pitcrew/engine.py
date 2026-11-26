@@ -11,6 +11,7 @@ from contextlib import ExitStack, contextmanager
 
 from . import demo
 from .agent_cli import AGENT_CLIS
+from .azure_prices import azure_token_rates
 from .credentials import ProviderCredentials, validate_key
 from .config import environment
 from .contracts import CONTRACTS, GUARD, INJECT, LABELS, PERSONAS, STAGES, manifest, require, validate
@@ -18,16 +19,17 @@ from .extensions import BROWSER_SKILL_BYTES, Extensions, atomic_text, bounded_te
 from .mcp_oauth import MCPOAuth
 from .integrations import (DEFAULT_HOSTS, NAME, VERSION, advisories, complete, environment_provider, fetch_source,
                            foundry_project_endpoint, initial_provider, list_provider_models, packages, provider_key,
-                           provider_settings)
+                           provider_settings, reports_charge)
 from .repository import Repository, github_url
 from .preflight import CACHES, check_workspace
 from .role_tools import ROLE_TOOLS
 from .sandbox import (MAX_SESSIONS, ContainerCapacity, Docker, ExecutionFailed, adaptive_lap_limit, detected_capacity,
                       execution_plan, execution_policy, profile)
 from .store import Store, encode, now, uid
+from .usage import MeteredModelError, Usage
 
 ACTIVE = ("queued", "running")
-TERMINAL = ("completed", "failed", "cancelled")
+TERMINAL = ("completed", "failed", "cancelled", "budget_paused")
 ATTEMPTS = 3
 
 
@@ -67,20 +69,28 @@ def prepare_provider(settings, credentials, key=""):
 
 def model_for_role(settings, role, session_id=None):
     if not settings.get("deployments"):
+        assigned = settings.get("model")
+    else:
+        assigned = settings["role_models"].get(role)
+        if not assigned:
+            deployments = settings["deployments"]
+            available = [model for model in deployments if model["chat"] is True]
+            if not available:
+                available = [model for model in deployments if model["chat"] is None]
+            offset = int(session_id, 16) if session_id else 0
+            assigned = available[(offset + tuple(PERSONAS).index(role)) % len(available)]["id"]
+    rates = settings.get("model_rates", {}).get(assigned, {})
+    if assigned is None:
         return settings
-    assigned = settings["role_models"].get(role)
-    if not assigned:
-        deployments = settings["deployments"]
-        available = [model for model in deployments if model["chat"] is True]
-        if not available:
-            available = [model for model in deployments if model["chat"] is None]
-        offset = int(session_id, 16) if session_id else 0
-        assigned = available[(offset + tuple(PERSONAS).index(role)) % len(available)]["id"]
-    return {**settings, "model": assigned}
+    return {**settings, "model": assigned, **rates}
 
 
 class Cancelled(Exception):
     """A locally requested cancellation."""
+
+
+class BudgetPaused(ValueError):
+    """A budget or missing price stopped the current paid work."""
 
 
 class QAExecutionFailed(ExecutionFailed):
@@ -110,6 +120,7 @@ class Lead:
         self.lock = threading.RLock()
         self.model_ready = threading.Condition(self.lock)
         self.active_model_calls = 0
+        self.project_model_calls = {}
         self.maintenance_lock = threading.Lock()
         self.docker_lock = threading.Lock()
         self.jobs = {}
@@ -134,6 +145,7 @@ class Lead:
             name.strip().lower() for name in environment("PITCREW_RESEARCH_HOSTS", "").split(",") if name.strip()
         ))))
         with self.store.db() as db:
+            self.store.reconcile_model_usage(db)
             db.execute("UPDATE sessions SET state='queued' WHERE state='running'")
             db.execute("""UPDATE attempts SET status='Retried',ended=?,trace=?
                        WHERE status='Running'""",
@@ -183,7 +195,11 @@ class Lead:
             except (ValueError, RuntimeError) as exc:
                 raise ValueError(self.store.redact(str(exc))) from None
         self.credential(data)
-        self.store.set("provider", settings)
+        with self.lock:
+            previous = self.store.setting("provider")
+            if all(previous.get(field) == settings.get(field) for field in ("kind", "endpoint")) and "model_rates" in previous:
+                settings["model_rates"] = previous["model_rates"]
+            self.store.set("provider", settings)
         result = self.provider()
         if connection_test is not None:
             result["connection_test"] = connection_test
@@ -191,6 +207,26 @@ class Lead:
 
     def models(self, data):
         return discover_models(self.provider_target(data), self.credentials, data.get("api_key", ""))
+
+    def import_azure_prices(self, data):
+        saved = self.store.setting("provider")
+        model = data.get("model")
+        available = {item["id"] for item in saved.get("deployments", [])} | {saved.get("model")}
+        require(saved["kind"] in ("foundry", "azure-gateway") and isinstance(model, str) and model and model in available,
+                "Select a saved Microsoft Foundry deployment or Azure AI Gateway model alias")
+        clear = data.get("clear") is True
+        rates = None if clear else azure_token_rates(data.get("region"), data.get("input_meter"), data.get("output_meter"))
+        with self.lock:
+            current = self.store.setting("provider")
+            require(all(current.get(field) == saved.get(field) for field in ("kind", "endpoint", "model", "deployments")),
+                    "Provider settings changed. Reopen the Azure rates form and try again.")
+            prices = current.get("model_rates", {})
+            if clear:
+                prices.pop(model, None)
+            else:
+                prices[model] = rates
+            self.store.set("provider", {**current, "model_rates": prices})
+        return {"model": model, "rates": rates}
 
     def extensions(self, check=False):
         return Extensions(self.store.directory, self.store.redact, oauth=self.mcp_oauth, docker=self.docker,
@@ -302,6 +338,35 @@ class Lead:
             self.store.event(session_id, "github_published", {"branch": branch, "commit": session["github_commit"]})
         return {"branch": branch, "commit": session["github_commit"], "url": url.removesuffix(".git") + "/tree/" + branch}
 
+    def budget(self, project_id, limit=...):
+        with self.model_ready:
+            if limit is not ...:
+                result = self.store.set_budget(project_id, limit)
+                self.model_ready.notify_all()
+                return result
+            result = self.store.budget(project_id)
+            require(result is not None, "RaceDay does not exist")
+            return result
+
+    def check_budget(self, project_id, settings, *, require_price=True):
+        if settings["kind"] == "demo" or self.store.row("SELECT budget_usd FROM projects WHERE id=?", (project_id,))["budget_usd"] is None:
+            return None
+        budget = self.store.budget(project_id)
+        if budget["budget_usd"] is None:
+            return None
+        if budget["reached"]:
+            raise BudgetPaused(f"RaceDay model budget reached (${budget['model_cost']:.2f} of ${budget['budget_usd']:.2f}). "
+                               "Update the RaceDay budget, then retry to resume.")
+        if budget["budget_hold"]:
+            raise BudgetPaused(budget["budget_hold"])
+        if require_price and settings["kind"] == "github-copilot":
+            raise BudgetPaused("The Copilot CLI has no per-call USD usage in this integration. Use a metered provider for this budget.")
+        if (require_price and settings["kind"] not in ("local", "claude-code") and not reports_charge(settings)
+                and settings.get("rate_source") != "azure_retail"
+                and not (settings["input_rate"] > 0 and settings["output_rate"] > 0)):
+            raise BudgetPaused(f"Set rates for {settings['model'] or 'the selected provider'} to price its tokens for this RaceDay budget.")
+        return budget["remaining_usd"]
+
     def launch(self, project_id, prompt, sample=False):
         project = self.store.row("SELECT github_url FROM projects WHERE id=?", (project_id,))
         require(project, "RaceDay does not exist")
@@ -316,6 +381,7 @@ class Lead:
                 config = prepare_provider(config, self.credentials)
             require(isinstance(prompt, str) and 1 <= len(prompt.strip()) <= 16000, "Enter a request up to 16,000 characters")
             require(not INJECT.search(prompt), "Request contains a disallowed instruction pattern")
+            self.check_budget(project_id, config, require_price=False)
             sid = self.store.session(project_id, prompt.strip(), config)
             self.store.message(sid, "lead", "Lap queued. I’ll plan the work and validate every stage before moving on.")
             self.submit(sid)
@@ -393,7 +459,15 @@ class Lead:
     def retry(self, session_id):
         with self.maintenance_lock, self.lock:
             session = self.get(session_id)
-            require(session["state"] in ("failed", "cancelled"), "Only failed or cancelled laps can be retried")
+            require(session["state"] in ("failed", "cancelled", "budget_paused"), "Only failed, cancelled, or budget-paused laps can be retried")
+            if session["state"] == "budget_paused":
+                saved = session["provider"]
+                current = self.store.setting("provider")
+                if all(saved.get(field) == current.get(field) for field in ("kind", "endpoint")):
+                    saved = {**saved, **{rate: current[rate] for rate in ("input_rate", "output_rate")},
+                             "model_rates": current.get("model_rates", {})}
+                self.check_budget(session["project_id"], saved, require_price=False)
+                self.store.update(session_id, provider=saved)
             self.store.update(session_id, state="queued", cancellation=0, error=None)
             self.store.message(session_id, "lead", "Lap queued to resume from its last approved stage.")
             self.submit(session_id)
@@ -424,6 +498,11 @@ class Lead:
             with project_lock:
                 self.check(sid)
                 self._run(self.get(sid))
+        except BudgetPaused as exc:
+            session = self.get(sid)
+            self.store.update(sid, state="budget_paused", error=str(exc))
+            self.store.event(sid, "budget_paused", {"stage": session["stage"], "message": str(exc)})
+            self.store.message(sid, "lead", str(exc))
         except Cancelled as exc:
             if self.closed.is_set() and not self.get(sid)["cancellation"]:
                 self.store.update(sid, state="queued", error=None)
@@ -463,6 +542,7 @@ class Lead:
 
     def _run(self, session):
         sid = session["id"]
+        self.check_budget(session["project_id"], session["provider"], require_price=False)
         self.store.update(sid, state="running", error=None)
         tree = self.repo.checkout(session)
         try:
@@ -620,6 +700,7 @@ class Lead:
         for number in range(1, ATTEMPTS + 1):
             until = time.monotonic() + self.timeout
             self.check(sid, until)
+            self.check_budget(session["project_id"], session["provider"], require_price=False)
             self.store.gate(sid, stage, "running", ended=None, details={"attempt": number})
             data = self.context(session, stage, approved, previous, failure, memory)
             if assigned:
@@ -670,6 +751,9 @@ class Lead:
                 self.remember(session, stage, artifact, memory, failure)
                 self.mark_passed(session, stage, sha, artifact, details)
                 return artifact
+            except BudgetPaused as exc:
+                self.store.gate(sid, stage, "budget_paused", ended=now(), details={"attempt": number, "error": str(exc)})
+                raise
             except Cancelled:
                 self.store.gate(sid, stage, "cancelled", ended=now(), details={"attempt": number})
                 raise
@@ -857,7 +941,8 @@ class Lead:
                     status = "Retried" if number < ATTEMPTS else "Failed"
                     trace = {"type": "ReviewRejected", "message": tracker["rejection"]}
         except Exception as exc:
-            status = "Retried" if number < ATTEMPTS and not isinstance(exc, Cancelled) else "Failed"
+            status = "Paused" if isinstance(exc, BudgetPaused) else (
+                "Retried" if number < ATTEMPTS and not isinstance(exc, Cancelled) else "Failed")
             trace = self.exception(exc)
             self.store.event(sid, "exception", trace, agent_id)
             raise
@@ -916,11 +1001,8 @@ class Lead:
             raw = encode(result)
         else:
             key = self.credentials.get(settings)
-            raw, tokens = self.call_model(sid, settings, key, persona, self.store.redact(data), until)
+            raw, tokens = self.call_model(sid, settings, key, persona, self.store.redact(data), until, attempt=agent["id"])
             result = None
-        cost = (tokens[0] * settings["input_rate"] + tokens[1] * settings["output_rate"]) / 1_000_000
-        self.store.write("""UPDATE attempts SET input_tokens=input_tokens+?,output_tokens=output_tokens+?,
-                            model_cost=model_cost+? WHERE id=?""", (*tokens, cost, agent["id"]))
         self.store.event(sid, "tool_result", {"tool": "model.chat", "model": settings.get("model"),
                                              "usage": list(tokens), "output": raw}, agent["id"])
         self.check(sid, until)
@@ -930,19 +1012,54 @@ class Lead:
         require(result == redacted, "Candidate appeared to contain a secret and was rejected")
         return result
 
-    def call_model(self, sid, settings, key, persona, data, until):
+    def call_model(self, sid, settings, key, persona, data, until, *, attempt=None, allow_cancelled=False):
+        project = self.get(sid)["project_id"] if sid is not None else None
         with self.model_ready:
-            remaining = self.check(sid, until)
-            while self.active_model_calls >= self.execution_policy["model_slots"]:
+            while True:
+                remaining = self.check(None if allow_cancelled else sid, until)
+                remaining_budget = self.check_budget(project, settings) if project is not None else None
+                if (self.active_model_calls < self.execution_policy["model_slots"]
+                        and not (remaining_budget is not None and self.project_model_calls.get(project, 0))):
+                    break
                 self.model_ready.wait(min(0.2, remaining))
-                remaining = self.check(sid, until)
             self.active_model_calls += 1
+            self.project_model_calls[project] = self.project_model_calls.get(project, 0) + 1
         try:
-            return self.model(settings, key, persona, data, min(150, remaining))
+            if attempt is not None:
+                self.store.write("UPDATE attempts SET metering_pending=1 WHERE id=?", (attempt,))
+            if remaining_budget is not None and settings["kind"] == "claude-code":
+                settings = {**settings, "remaining_model_budget": remaining_budget}
+            try:
+                result, usage = self.model(settings, key, persona, data, min(150, remaining))
+            except Exception as exc:
+                if attempt is not None:
+                    usage = exc.usage if isinstance(exc, MeteredModelError) else Usage((None, None))
+                    self.account_model_call(sid, attempt, settings, usage)
+                if isinstance(exc, MeteredModelError) and exc.budget_reached:
+                    raise BudgetPaused(str(exc)) from exc
+                raise
+            if attempt is not None:
+                self.account_model_call(sid, attempt, settings, usage)
+            return result, usage
         finally:
             with self.model_ready:
                 self.active_model_calls -= 1
-                self.model_ready.notify()
+                self.project_model_calls[project] -= 1
+                if not self.project_model_calls[project]:
+                    del self.project_model_calls[project]
+                self.model_ready.notify_all()
+
+    def account_model_call(self, sid, attempt, settings, usage):
+        usage = usage if isinstance(usage, Usage) else Usage(usage)
+        amount, source = usage.price(settings)
+        hold = ("The provider returned no usable cost or token usage. Review the provider settings and save the "
+                "RaceDay budget before resuming.") if source == "unpriced" else None
+        paused = self.store.record_model_usage(attempt, usage, amount, source, hold)
+        self.store.event(sid, "model_usage", {"model": settings["model"], "usage": list(usage),
+                                              "amount_usd": amount, "cost_source": source,
+                                              "provider_request_id": usage.request_id}, attempt)
+        if paused:
+            raise BudgetPaused(hold)
 
     def research(self, session, data, agent, until, sample):
         deep = session["execution"]["deep_research"] and not sample
@@ -1316,25 +1433,31 @@ class Lead:
                        "agent_playbook": self.store.playbook(session["project_id"], "lead")}
             persona = (PERSONAS["lead"] + "\n" + GUARD + "\nAnswer this session question using known facts only. "
                        'Return {"answer":"..."}. To change scope direct the user to start a follow-up session.')
+            attempt = None
             try:
                 settings = model_for_role(session["provider"], "lead", sid)
+                self.check_budget(session["project_id"], settings)
                 key = self.credentials.get(settings)
+                attempt = uid()
+                self.store.write("""INSERT INTO attempts (id,session_id,stage,role,number,status,profile,started,persona,input)
+                    VALUES (?,?,?,?,?,'Running',?,?,?,?)""",
+                    (attempt, sid, session["stage"], "lead", 1, encode({"image": "Control plane", "cpu": 0,
+                     "ram": 0, "pids": 0, "network": "provider broker"}), now(), persona, encode(context)))
                 self.store.event(sid, "tool_call", {"tool": "lead.chat", "stage": session["stage"], "model": settings["model"],
-                                                   "persona": persona, "input": context})
-                raw, usage = self.call_model(None, settings, key, persona, context, time.monotonic() + 25)
+                                                   "persona": persona, "input": context}, attempt)
+                raw, usage = self.call_model(sid, settings, key, persona, context, time.monotonic() + 25,
+                                             attempt=attempt, allow_cancelled=True)
                 answer = json.loads(raw).get("answer")
                 if isinstance(answer, str) and answer.strip():
                     response = answer[:6000]
                 self.store.event(sid, "tool_result", {"tool": "lead.chat", "stage": session["stage"], "model": settings["model"],
-                                                     "output": raw, "usage": list(usage)})
-                # Status chat is attributed to the Lead so project totals include every provider call.
-                model_cost = (usage[0] * session["provider"]["input_rate"]
-                              + usage[1] * session["provider"]["output_rate"]) / 1_000_000
-                self.store.write("""INSERT INTO attempts (id,session_id,stage,role,number,status,profile,started,ended,
-                    persona,input,input_tokens,output_tokens,model_cost) VALUES (?,?,?,?,?,'Success',?,?,?,?,?,?,?,?)""",
-                    (uid(), sid, session["stage"], "lead", 1, encode({"image": "Control plane", "cpu": 0,
-                    "ram": 0, "pids": 0, "network": "provider broker"}), now(), now(), persona, encode(context),
-                    *usage, model_cost))
+                                                     "output": raw, "usage": list(usage)}, attempt)
+                self.store.write("UPDATE attempts SET ended=?,status='Success' WHERE id=?", (now(), attempt))
             except Exception as exc:
-                self.store.event(sid, "exception", {**self.exception(exc), "stage": session["stage"]})
+                if isinstance(exc, BudgetPaused):
+                    response = str(exc) + " " + response
+                if attempt is not None:
+                    status = "Paused" if isinstance(exc, BudgetPaused) else "Failed"
+                    self.store.write("UPDATE attempts SET ended=?,status=? WHERE id=?", (now(), status, attempt))
+                self.store.event(sid, "exception", {**self.exception(exc), "stage": session["stage"]}, attempt)
         self.store.message(sid, "lead", response.strip(), reply_to=question_id)

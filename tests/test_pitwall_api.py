@@ -147,3 +147,17 @@ class PitWallAPITest(unittest.TestCase):
             self.assertEqual(json.loads(self.command("retry", sid, "--detach", "--json")[0])["id"], sid)
             self.assertEqual(self.remote.status(sid)["state"], "queued")
             self.assertEqual(self.remote.sessions(project["id"])[0]["id"], sid)
+
+    def test_raceday_budget_is_editable_in_api_and_cli(self):
+        project = self.remote.create("Budgeted Board")["id"]
+        path = f"/api/projects/{project}/budget"
+        self.assertIsNone(self.remote.request(path)["budget_usd"])
+        self.assertEqual(self.post(path, {"budget_usd": -1})[0], 400)
+        self.assertEqual(self.post(path, {"budget_usd": 1.123})[0], 400)
+        self.assertEqual(self.post(path, {})[0], 400)
+        saved = json.loads(self.command("budget", "--raceday", "Budgeted Board", "--limit", "12.25", "--json")[0])
+        self.assertEqual(saved["remaining_usd"], 12.25)
+        self.assertEqual(self.remote.request(f"/api/projects/{project}/sessions")["budget"], saved)
+        self.assertEqual(self.post(path, {"budget_usd": 0})[0], 200)
+        self.assertIn("Budget reached", self.command("budget", "--raceday", project)[0])
+        self.assertIn("Unset", self.command("budget", "--raceday", project, "--clear")[0])

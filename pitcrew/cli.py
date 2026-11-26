@@ -78,6 +78,11 @@ class RemoteWorkspace:
     def publish(self, session):
         return self.request(f"/api/sessions/{session}/publish", {})
 
+    def budget(self, project, limit=MISSING):
+        require(self.about.get("capabilities", {}).get("raceday_budgets"), "Restart Pit Wall to use RaceDay budgets")
+        body = MISSING if limit is MISSING else {"budget_usd": limit}
+        return self.request(f"/api/projects/{project}/budget", body)
+
     def sessions(self, project):
         return self.request(f"/api/projects/{project}/sessions")["sessions"]
 
@@ -154,6 +159,12 @@ class LocalWorkspace:
 
     def publish(self, session):
         return self.lead.publish(session)
+
+    def budget(self, project, limit=MISSING):
+        if limit is MISSING:
+            return self.store.budget(project)
+        with workspace_lock(self.store.directory):
+            return self.store.set_budget(project, limit)
 
     def sessions(self, project):
         return self.store.rows("""SELECT id,project_id,prompt,state,stage,branch,created,updated,error FROM sessions
@@ -652,6 +663,23 @@ def prompt_credential(prompt="Provider credential: "):
 
 def run_action(args, backend):
     json_output = getattr(args, "json", False)
+    if args.command == "budget":
+        project = project_id(backend, args.project)
+        limit = None if args.clear else getattr(args, "limit", MISSING)
+        result = backend.budget(project, limit)
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            cap = result["budget_usd"]
+            print(f"Model budget  ${cap:.2f}" if cap is not None else "Model budget  Unset")
+            print(f"Model spend   ${result['model_cost']:.4f} (${result['vendor_cost']:.4f} in vendor charges)")
+            if cap is not None:
+                print(f"Remaining     ${result['remaining_usd']:.4f}" + (" · Budget reached" if result["reached"] else ""))
+            if result["unpriced_calls"]:
+                print(f"Unpriced model calls  {result['unpriced_calls']}")
+            if result["budget_hold"]:
+                print(result["budget_hold"])
+        return 0
     if args.command == "doctor":
         result = backend.preflight(not args.local_only)
         if json_output:
@@ -843,6 +871,7 @@ def parser_for_cli():
         "credential": "Save or forget the provider credential in the system keyring",
         "provider-test": "Send a connectivity check to the configured model",
         "new-raceday": "Create a RaceDay and optionally connect a GitHub repository",
+        "budget": "Show, set, or clear a RaceDay model budget in USD",
         "run": "Start a lap or the built-in practice run", "projects": "List RaceDays", "sessions": "List laps",
         "status": "Show lap and build status", "logs": "Read or follow filtered lap telemetry",
         "retry": "Resume at the first unapproved stage", "cancel": "Request cancellation",
@@ -899,6 +928,11 @@ def parser_for_cli():
             command.add_argument("name")
             command.add_argument("--github", metavar="URL", help="GitHub HTTPS repository URL")
             command.add_argument("--branch", help="Source branch. Defaults to the repository default branch.")
+        if name == "budget":
+            command.add_argument("--raceday", dest="project", required=True, metavar="RACEDAY")
+            budget = command.add_mutually_exclusive_group()
+            budget.add_argument("--limit", type=float, default=argparse.SUPPRESS, metavar="USD")
+            budget.add_argument("--clear", action="store_true")
         if name in ("status", "logs", "retry", "cancel", "preview", "publish"):
             command.add_argument("session", metavar="LAP_ID")
         if name in ("run", "retry"):

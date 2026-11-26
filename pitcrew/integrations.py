@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlsplit
 from .agent_cli import AGENT_CLIS, complete_with_cli
 from .config import environment
 from .contracts import INJECT, MAX_BYTES, require
+from .usage import MeteredModelError, Usage, usd_amount
 
 DEFAULT_HOSTS = (
     "developer.mozilla.org", "docs.python.org", "nodejs.org", "playwright.dev", "web.dev",
@@ -73,6 +74,10 @@ def request(url, *, payload=None, headers=None, timeout=30, limit=MAX_BYTES * 2,
         sock = conn.sock
         response = conn.getresponse()
         if not 200 <= response.status < 300:
+            if (response.status == 429 and location.hostname.endswith((".services.ai.azure.com", ".openai.azure.com"))
+                    and response.getheader("x-ms-budget-cause") == "budget_exceeded"):
+                raise MeteredModelError("Microsoft Foundry blocked the request at its vendor budget. Review the Foundry cost control before resuming.",
+                                        Usage((0, 0), 0, "vendor_blocked"), budget_reached=True)
             raise RuntimeError(f"{location.hostname} returned HTTP {response.status}")
         chunks = bytearray()
         while len(chunks) <= limit:
@@ -226,25 +231,41 @@ def list_provider_models(settings, key):
     return {"kind": settings["kind"], "models": [models[identifier] for identifier in sorted(models, key=str.casefold)]}
 
 
+def reports_charge(settings):
+    endpoint = urlsplit(settings.get("endpoint", ""))
+    return endpoint.scheme == "https" and endpoint.hostname in ("openrouter.ai", "eu.openrouter.ai", "us.openrouter.ai")
+
+
 def complete(settings, key, persona, data, timeout):
     if settings["kind"] in AGENT_CLIS:
         content, tokens = complete_with_cli(settings, persona, data, timeout)
     else:
         headers = provider_headers(settings, key)
-        response, _ = request(settings["endpoint"] + "/chat/completions", timeout=timeout, headers=headers,
-                              payload={"model": settings["model"], "messages": [
-                                  {"role": "system", "content": persona},
-                                  {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
-                              ]})
+        payload = {"model": settings["model"], "messages": [
+            {"role": "system", "content": persona},
+            {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
+        ]}
+        openrouter = reports_charge(settings)
+        response, _ = request(settings["endpoint"] + "/chat/completions", timeout=timeout, headers=headers, payload=payload)
         obj = json.loads(response)
-        choice = obj["choices"][0]
-        if choice.get("finish_reason") not in (None, "stop"):
-            raise RuntimeError(f"Provider stopped with {choice.get('finish_reason')}")
-        content = choice["message"]["content"]
         usage = obj.get("usage") or {}
-        tokens = tuple(item if type(item) is int and item >= 0 else 0
-                       for item in (usage.get("prompt_tokens"), usage.get("completion_tokens")))
-    require(isinstance(content, str), "Provider returned no text")
+        amount, cost_source = usage.get("cost") if openrouter else None, "vendor_charge"
+        if openrouter and usage.get("is_byok") is True:
+            details = usage.get("cost_details") or {}
+            upstream = usd_amount(details.get("upstream_inference_cost"))
+            fee = usd_amount(amount)
+            amount = upstream + fee if upstream is not None and fee is not None else None
+            cost_source = "vendor_estimate"
+        tokens = Usage((usage.get("prompt_tokens"), usage.get("completion_tokens")), amount, cost_source, obj.get("id"))
+        try:
+            choice = obj["choices"][0]
+            if choice.get("finish_reason") not in (None, "stop"):
+                raise MeteredModelError(f"Provider stopped with {choice.get('finish_reason')}", tokens)
+            content = choice["message"]["content"]
+        except (IndexError, KeyError, TypeError) as exc:
+            raise MeteredModelError("Provider returned no completion", tokens) from exc
+    if not isinstance(content, str):
+        raise MeteredModelError("Provider returned no text", tokens)
     cleaned = content.strip()
     if cleaned.startswith("```") and cleaned.endswith("```"):
         cleaned = cleaned.split("\n", 1)[-1][:-3].strip()

@@ -84,6 +84,22 @@ The Lead, specialists, and reviewers receive the pinned commit, its editable pat
 
 After approval, Pit Crew creates a local commit descended from the imported Git history. Later laps start from the most recent approved commit in that RaceDay. **Push lap branch to GitHub** in Parc Fermé publishes to `pitcrew/lap-LAP_ID`. Use GitHub's normal review and merge flow to update the source branch.
 
+## Set a RaceDay model budget
+
+Open a RaceDay and select **Model budget**. The USD limit covers model requests across its Laps, including specialists, reviewers, retries, and Team Radio. Enter zero to stop new model requests or leave the field blank to clear the limit. The RaceDay shows recorded spend, remaining budget, and calls without complete pricing data. Docker compute estimates are shown separately.
+
+Pit Crew records OpenRouter’s per-request credit charges and Claude Code’s reported USD estimates. With Microsoft Foundry, Azure AI Gateway, and other compatible APIs that return token counts, set the input and output prices in **Power Unit** to turn those counts into estimates. Azure billing records arrive later. The Copilot CLI integration lacks per-call USD data. Choose a provider with usable cost or token data for a budgeted RaceDay. [OpenRouter usage](https://learn.openrouter.ai/courses/first-request/read-the-response) · [Claude Code estimates](https://code.claude.com/docs/en/headless#pipe-data-through-claude) · [Microsoft Foundry costs](https://learn.microsoft.com/en-us/azure/foundry/concepts/manage-costs)
+
+For Microsoft Foundry or Azure AI Gateway, open **Azure model rates** on the RaceDay to import published rates for each deployed model. Enter its Azure region and the matching input and output token meter IDs. Pit Crew fetches the meters from Microsoft and uses the saved rate for that deployment on new or resumed Laps. Assign priced deployments to the agent roles when budgeting a pool of models. Retail rates are estimates before account discounts and other invoice adjustments. Pit Crew also pauses when Foundry rejects a call at a vendor cost control. [Azure Retail Prices API](https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices) · [Foundry cost controls](https://learn.microsoft.com/en-us/azure/foundry/concepts/cost-controls)
+
+Pit Crew allows one model request at a time per budgeted RaceDay. It also passes the remaining amount to Claude Code’s own budget control. When recorded spend reaches the limit, the next request is blocked. An in-flight request can still push the total past the limit. If a call has no usable cost or its charge is missing after restart, Pit Crew pauses paid work for the RaceDay. Review the provider’s usage and save the budget before resuming. **Resume lap** continues from the most recent approved stage after the budget permits it. [Claude Code budget flag](https://code.claude.com/docs/en/cli-reference)
+
+```sh
+pitcrew budget --raceday "Task board" --limit 20
+pitcrew budget --raceday "Task board" --json
+pitcrew budget --raceday "Task board" --clear
+```
+
 ## Install the CLI
 
 From the repository root, install the command for your user account.
@@ -303,7 +319,7 @@ If an application fails its sandbox QA checks after passing the build gate, the 
 - **Git** lives under `.pitcrew-data/monorepo`. Source lives at `projects/<project-id>/app`. Session documents and audit logs live at `.omni/sessions/<session-id>`. Session worktrees, packages and staging inputs share the same private data directory.
 - **Setup Book** stores nodes and edges in the SQLite workspace database. Approved decisions, verified patterns, failures and remedies persist across projects. Relevance increases when an approved artifact demonstrates use of a retrieved node. Setup Book consolidation deduplicates canonical records, prunes old unlinked low-weight nodes, and connects recurring fixes and cross-project practices. Set `PITCREW_DREAM_INTERVAL` to tune its interval or use the workspace button during idle time.
   Open the **Setup Book** to consolidate crew notes, view earlier consolidation runs, or search recorded decisions and links.
-- **Costs** use provider-reported input and output tokens and estimated CPU allocation time. Set rates in Provider settings to display nonzero estimates.
+- **Costs** use vendor charges or estimates when available, and provider-reported token counts priced at configured rates otherwise. Docker compute estimates use CPU allocation time.
 - **Timeouts** are bounded per stage attempt with `PITCREW_STAGE_TIMEOUT`, defaulting to 240 seconds. Model calls, source retrieval, browser actions, execution logs, process counts and preview requests also have narrower limits.
 
 The workspace directory is per OS user. Store it on local storage accessible to the local Docker daemon. This implementation supports a single workspace owner on loopback. The preview is a local release environment.

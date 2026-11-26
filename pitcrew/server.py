@@ -28,6 +28,7 @@ ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/pitcrew-mark.png": ("pitcrew-mark.png", "image/png"),
           "/agent-portraits.png": ("agent-portraits.png", "image/png")}
 PROJECT = re.compile(r"/api/projects/([0-9a-f]{16})/sessions\Z")
+PROJECT_BUDGET = re.compile(r"/api/projects/([0-9a-f]{16})/budget\Z")
 SESSION = re.compile(r"/api/sessions/([0-9a-f]{16})(?:/(agents|telemetry|messages|build|preview|cancel|retry|publish))?"
                      r"(?:/([0-9a-f]{16}))?\Z")
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
@@ -133,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/workspace":
             self.json({"csrf": self.server.csrf, "workspace_id": lead.workspace, "projects": store.projects(),
                        "provider": lead.provider(), "memory": store.memory_health(),
-                       "capabilities": {"github_racedays": True}})
+                       "capabilities": {"github_racedays": True, "raceday_budgets": True}})
         elif path == "/api/extensions":
             self.json(lead.extensions())
         elif path == "/api/extensions/config":
@@ -168,11 +169,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.json({"ready": True, "capacity": lead.docker.doctor()})
             except Exception as exc:
                 self.json({"ready": False, "detail": store.redact(str(exc))})
+        elif match := PROJECT_BUDGET.fullmatch(path):
+            self.json(lead.budget(match[1]))
         elif match := PROJECT.fullmatch(path):
             project = store.row("SELECT * FROM projects WHERE id=?", (match[1],))
             if not project:
                 raise HTTPFailure(404, "RaceDay does not exist")
-            self.json({"project": project, "sessions": store.rows(
+            self.json({"project": project, "budget": store.budget(match[1]), "sessions": store.rows(
                 """SELECT id,prompt,state,stage,branch,created,updated,error FROM sessions
                    WHERE project_id=? ORDER BY created DESC""", (match[1],))})
         elif match := SESSION.fullmatch(path):
@@ -249,6 +252,8 @@ class Handler(BaseHTTPRequestHandler):
             self.json(lead.configure(data))
         elif path == "/api/provider/models":
             self.json(lead.models(data))
+        elif path == "/api/provider/azure-prices":
+            self.json(lead.import_azure_prices(data))
         elif path == "/api/provider/credential":
             self.json(lead.credential(data))
         elif path == "/api/provider/test":
@@ -275,6 +280,9 @@ class Handler(BaseHTTPRequestHandler):
             if result is None:
                 raise HTTPFailure(409, "Dreaming runs between active sessions")
             self.json(result)
+        elif match := PROJECT_BUDGET.fullmatch(path):
+            require(set(data) == {"budget_usd"}, "Provide budget_usd to set or clear the limit")
+            self.json(lead.budget(match[1], data["budget_usd"]))
         elif match := PROJECT.fullmatch(path):
             self.json({"id": lead.launch(match[1], data.get("prompt"), sample=data.get("sample") is True)}, 202)
         elif match := SESSION.fullmatch(path):
