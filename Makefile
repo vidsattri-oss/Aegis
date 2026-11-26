@@ -3,7 +3,7 @@ NODE ?= node
 DOCKER ?= docker
 PREFIX ?= $(HOME)/.local
 
-.PHONY: all build install check test images image-worker image-qa image-runtime run doctor smoke
+.PHONY: all build install check test coverage images image-worker image-qa image-runtime run doctor smoke
 
 all: build images
 
@@ -30,6 +30,12 @@ check:
 
 test: check
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
+
+coverage: check
+	$(PYTHON) -m coverage erase
+	$(PYTHON) -m coverage run -m unittest discover -s tests -p 'test_*.py' -v
+	$(PYTHON) -m coverage combine -q
+	$(PYTHON) -m coverage report
 
 images: image-worker image-qa image-runtime
 

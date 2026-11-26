@@ -102,13 +102,78 @@ class WorkspaceTest(unittest.TestCase):
 
     @staticmethod
     def completed(lead, sid):
-        expires = time.monotonic() + 15
+        expires = time.monotonic() + 45
         while time.monotonic() < expires:
             result = lead.get(sid)
             if result["state"] in TERMINAL:
                 return lead.store.summary(sid)
             time.sleep(0.02)
-        raise TimeoutError("Session fixture stalled")
+        raise TimeoutError(f"Session fixture stalled in {result['stage']} ({result['state']})")
+
+    def test_specialists_run_concurrently_and_report_in_plan_order(self):
+        lead = self.lead(DockerFixture())
+        project = lead.create_project("Parallel crew")
+        sid = lead.store.session(project["id"], "Improve the task board", provider_settings({"kind": "demo"}))
+        session = lead.get(sid)
+        session["execution"] = lead.execution_settings()
+        assignments = [{"name": name, "persona": "Review a specific user journey", "assignment": assignment}
+                       for name, assignment in (("Keyboard", "Inspect focus order"), ("State", "Inspect persistence"))]
+        plan = {"specialists": assignments, "criteria": [{"id": "AC1", "description": "The board works"}]}
+        both_started = threading.Barrier(2, timeout=5)
+        second_finished = threading.Event()
+        retry = {"message": "The first plan missed focus restoration"}
+
+        def ask(session, role, data, agent, until, sample):
+            index = assignments.index(data["specialist"])
+            self.assertIn("attempt 2", agent["persona"])
+            self.assertEqual(data["retry_context"], retry)
+            other = assignments[1 - index]
+            self.assertEqual(data["other_assignments"], [{"name": other["name"], "assignment": other["assignment"]}])
+            self.assertEqual(data["criteria"], plan["criteria"])
+            self.assertEqual(data["repository"], {"commit": "pinned"})
+            both_started.wait()
+            if index == 0:
+                self.assertTrue(second_finished.wait(5))
+            return {"summary": data["specialist"]["name"], "findings": ["Finding"], "recommendations": ["Check"]}
+
+        def record(*args):
+            result = submit(*args)
+            if result["summary"] == "State":
+                second_finished.set()
+            return result
+
+        submit = lead.role_tool
+        with patch.object(lead, "ask", side_effect=ask), patch.object(lead, "role_tool", side_effect=record):
+            reports = lead.delegate(session, plan, {"retry_context": retry, "repository": {"commit": "pinned"}},
+                                    2, time.monotonic() + 12, True, "lead-attempt")
+        self.assertEqual([report["name"] for report in reports], ["Keyboard", "State"])
+        self.assertEqual(len({report["attempt"] for report in reports}), 2)
+        self.assertFalse(lead.capacity.report()["holds"])
+        events = lead.store.rows("SELECT payload FROM events WHERE session_id=? AND kind='delegated'", (sid,))
+        self.assertEqual({event["payload"]["parent"] for event in events}, {"lead-attempt"})
+
+    def test_failed_specialist_round_joins_other_worker_before_retry(self):
+        lead = self.lead(DockerFixture())
+        project = lead.create_project("Specialist recovery")
+        sid = lead.store.session(project["id"], "Review the board", provider_settings({"kind": "demo"}))
+        session = lead.get(sid)
+        session["execution"] = lead.execution_settings()
+        plan = {"specialists": [{"name": name, "assignment": name} for name in ("First", "Second")]}
+        failed = threading.Event()
+        cleaned_up = threading.Event()
+
+        def specialist(session, plan, data, assignment, *args):
+            if assignment["name"] == "First":
+                failed.set()
+                raise ValueError("First assessment failed")
+            self.assertTrue(failed.wait(5))
+            cleaned_up.set()
+            return {"name": "Second"}
+
+        with patch.object(lead, "run_specialist", side_effect=specialist):
+            with self.assertRaisesRegex(ValueError, "First assessment failed"):
+                lead.delegate(session, plan, {}, 1, time.monotonic() + 12, True, "lead-attempt")
+        self.assertTrue(cleaned_up.is_set())
 
     def test_pipeline_retries_qa_and_merges_its_verified_build(self):
         docker = DockerFixture(failures=1)

@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+.coverage
+.coverage.*
 dist/
 .omni-data/
 .omni-smoke-*/

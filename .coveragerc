@@ -1,0 +1,11 @@
+[run]
+source =
+    pitcrew
+    omni
+    containers
+patch = subprocess
+
+[report]
+fail_under = 85
+precision = 2
+show_missing = True

@@ -26,8 +26,8 @@ def main():
     app = target / "pitcrew-src.tar.gz"
     temporary = target / "pitcrew-src.tmp"
     with tarfile.open(temporary, "w:gz") as archive:
-        for name in ("README.md", "Makefile", ".gitignore", ".dockerignore", "containers", "pitcrew", "omni", "tests", "examples",
-                     "docs/screenshots"):
+        for name in ("README.md", "Makefile", "requirements-dev.txt", ".coveragerc", ".gitignore", ".dockerignore",
+                     "containers", "pitcrew", "omni", "tests", "examples", "docs/screenshots"):
             path = ROOT / name
             if path.is_file():
                 archive.add(path, arcname=name)

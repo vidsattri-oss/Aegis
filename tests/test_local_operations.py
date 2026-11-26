@@ -1,12 +1,14 @@
 import os
 import tempfile
 import time
+import tarfile
 import unittest
 from contextlib import chdir
 from pathlib import Path
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
+from pitcrew import build
 from pitcrew.config import default_workspace
 from pitcrew.continuity import DATABASE, backup_workspace, restore_workspace
 from pitcrew.extensions import server_from
@@ -17,6 +19,26 @@ from pitcrew.store import Store
 
 
 class LocalOperationsTest(unittest.TestCase):
+    def test_packaging_includes_developer_workflow_and_excludes_compiled_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp)
+            package = source / "pitcrew"
+            package.mkdir()
+            (package / "cli.py").write_text("def main():\n    pass\n", encoding="utf-8")
+            (package / "cached.pyc").touch()
+            (package / "__pycache__").mkdir()
+            (package / "__pycache__" / "data").touch()
+            (source / ".coveragerc").touch()
+            (source / "requirements-dev.txt").touch()
+            with patch.object(build, "ROOT", source), patch("builtins.print"):
+                build.main()
+            with ZipFile(source / "dist" / "pitcrew") as executable:
+                self.assertIn("__main__.py", executable.namelist())
+                self.assertIn("pitcrew/cli.py", executable.namelist())
+                self.assertNotIn("pitcrew/cached.pyc", executable.namelist())
+            with tarfile.open(source / "dist" / "pitcrew-src.tar.gz") as archive:
+                self.assertEqual(set(archive.getnames()), {".coveragerc", "requirements-dev.txt", "pitcrew/cli.py"})
+
     def test_default_workspace_outside_a_checkout_uses_user_data_directory(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)

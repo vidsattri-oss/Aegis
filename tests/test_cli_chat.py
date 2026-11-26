@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -178,6 +179,43 @@ class CliChatTest(unittest.TestCase):
         self.assertTrue(sparkle[1].endswith("*"))
         self.assertNotIn("*", "".join(sparkle[2:]))
         self.assertEqual(terminal.banner_frame(SHINE_FRAMES, 20), ["Pit Crew Harness", "/help for commands"])
+
+    def test_animated_terminal_restores_the_cursor_and_removes_control_characters(self):
+        palettes = (("xterm", "", "93"), ("xterm-256color", "", "38;5;221"),
+                    ("xterm-256color", "truecolor", "38;2;255;200;98"))
+        for term, color, gold in palettes:
+            with self.subTest(term=term, color=color), patch.dict(os.environ, {"TERM": term, "COLORTERM": color}, clear=True):
+                with patch("sys.stdout.isatty", return_value=True):
+                    terminal = Terminal(animation=True)
+                self.assertEqual(terminal.palette["gold"], gold)
+                self.assertIn("radio>", terminal.prompt(True, readline=True))
+
+        with (redirect_stdout(io.StringIO()) as output,
+              patch("pitcrew.terminal.shutil.get_terminal_size", return_value=os.terminal_size((80, 24))),
+              patch("pitcrew.terminal.time.sleep")):
+            terminal.banner()
+            with terminal.waiting("Checks\x1b ready") as pause:
+                with patch("pitcrew.terminal.time.monotonic", side_effect=[0.0, 0.0, 1.0]):
+                    pause(0.1)
+        self.assertIn("\033[?25l", output.getvalue())
+        self.assertIn("\033[?25h", output.getvalue())
+        self.assertIn("Checks ready", output.getvalue())
+
+    def test_cli_generates_a_service_and_restores_a_stopped_workspace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, restored = root / "workspace", root / "restored"
+            project = Store(data).project("Service fixture", "")
+            archive, unit = root / "backup.zip", root / "pitcrew.service"
+            base = [sys.executable, "-m", "omni"]
+            commands = ((data, ("service", "--port", "8766", "--docker-context", "desktop-linux", "--write", str(unit))),
+                        (data, ("backup", str(archive))), (restored, ("restore", str(archive))))
+            for directory, args in commands:
+                result = subprocess.run([*base, "--data", str(directory), *args], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Environment="DOCKER_CONTEXT=desktop-linux"', unit.read_text(encoding="utf-8"))
+            self.assertIn('"--port" "8766"', unit.read_text(encoding="utf-8"))
+            self.assertEqual(Store(restored).projects()[0]["id"], project["id"])
 
     def test_follow_up_gets_the_previous_turn_and_its_own_reply(self):
         requests = []

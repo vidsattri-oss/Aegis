@@ -51,6 +51,8 @@ make doctor
 make run
 ```
 
+For development, install `requirements-dev.txt` into a Python environment and run `make coverage`. It runs the tests and requires at least 85% line coverage across the Python application, CLI, and container code. Run `make smoke` to verify execution with real Docker containers.
+
 Open [Pit Wall](http://127.0.0.1:8765/), create a RaceDay, and select **Start practice run** to build Fieldwork, an alpine expedition planner. When the lap clears all checks, select **Parc Fermé → Launch preview** to open Fieldwork in a separate tab. The practice run uses bundled model responses and example research. It needs the local Docker images.
 
 Hover or Tab to an F1 term for its definition. On a touchscreen, tap a **?** icon. Open **F1 terms** in the top bar for the full glossary.
@@ -280,7 +282,7 @@ Pit Wall shows local RaceDays, model and compute estimates, crew counts, and bui
 
 ## Specialists and agent playbooks
 
-The Lead can add up to two specialists to its plan, each with a name, persona focus, and assignment. Each gets its own resource-limited Docker worker and returns findings for the crew. The plan and the reports go through independent review. Open **Telemetry** to inspect a specialist’s persona, input, and container lifecycle.
+The Lead can add up to two specialists to its plan, each with a name, persona focus, and assignment. Their bounded advisory work runs concurrently when detected Docker capacity allows. Each sees the other assignments to reduce duplicated findings, and their reports return in plan order for the crew. The plan and the reports go through independent review. Open **Telemetry** to inspect a specialist’s persona, input, and container lifecycle. Retries carry the failure evidence forward and ask the agent to change the failed approach.
 
 Each role receives its own RaceDay playbook. An agent can propose a technique for future laps and cite evidence from validation. Pit Crew records lessons after the gate passes, including successful recoveries after failed attempts. **Setup Book → Consolidate notes** groups recent verified lessons into versioned playbooks between laps. Later attempts receive those playbooks as evidence while the user’s brief and the approval checks continue to define success. This applies Anthropic’s evaluate-and-iterate pattern to agent guidance. [When AI builds itself](https://www.anthropic.com/institute/recursive-self-improvement)
 

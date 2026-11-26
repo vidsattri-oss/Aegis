@@ -20,10 +20,12 @@ def main():
         lead = Lead(Path(scratch))
         try:
             project = lead.store.project("Real Docker smoke test", "")
-            demo.EXAMPLES["lead"]["specialists"] = [{
-                "name": "Acceptance specialist", "persona": "Focus on observable user outcomes.",
-                "assignment": "Review the build plan and suggest acceptance checks.",
-            }]
+            demo.EXAMPLES["lead"]["specialists"] = [
+                {"name": "Acceptance specialist", "persona": "Focus on observable user outcomes.",
+                 "assignment": "Review the build plan and suggest acceptance checks."},
+                {"name": "Accessibility specialist", "persona": "Focus on keyboard navigation.",
+                 "assignment": "Identify missing accessibility scenarios."},
+            ]
             sid = lead.launch(project["id"], "", sample=True)
             deadline = time.monotonic() + 600
             while time.monotonic() < deadline:
@@ -35,7 +37,8 @@ def main():
                 raise AssertionError(f"{session['stage']} ended with {session['state']}: {session['error']}")
             summary = lead.store.summary(sid)
             assert len(summary["gates"]) == 7
-            assert any(agent["role"] == "specialist" and agent["status"] == "Success" for agent in summary["agents"])
+            specialists = [agent for agent in summary["agents"] if agent["role"] == "specialist"]
+            assert len(specialists) == 2 and all(agent["status"] == "Success" for agent in specialists)
             assert lead.dream()["playbooks_revised"] == 9
             with urlopen(session["preview"], timeout=15) as response:
                 assert demo.TITLE.encode() in response.read()
@@ -43,7 +46,7 @@ def main():
                 assert b"data:image/webp;base64," in response.read()
             with ZipFile(session["bundle"]) as archive:
                 assert archive.testzip() is None and set(demo.FILES) <= set(archive.namelist())
-            print("Lead plan, delegated specialist, all six stage gates, crew playbooks, live preview, and build ZIP passed.")
+            print("Lead plan, two specialists, all six stage gates, crew playbooks, live preview, and build ZIP passed.")
         finally:
             lead.close()
 
