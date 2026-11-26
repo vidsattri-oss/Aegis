@@ -1,4 +1,4 @@
-"""Run RittaiHarness projects and inspect sessions from a terminal."""
+"""Manage Pit Crew Harness RaceDays, laps, and telemetry from a terminal."""
 import argparse
 import getpass
 import http.client
@@ -14,12 +14,14 @@ from pathlib import Path
 from urllib.parse import urlencode
 from zipfile import BadZipFile
 
-from .contracts import LABELS, PERSONAS, STAGES, require
+from .agent_cli import AGENT_CLIS
+from .config import default_workspace
+from .contracts import PERSONAS, STAGES, require
 from .continuity import DATABASE, backup_workspace, restore_workspace, user_service
 from .credentials import ProviderCredentials
 from .engine import Lead, TERMINAL, check_provider, discover_models, prepare_provider
 from .extensions import Extensions
-from .integrations import environment_provider, initial_provider, provider_key, provider_settings
+from .integrations import environment_provider, foundry_project_endpoint, initial_provider, provider_key, provider_settings
 from .preflight import check_workspace
 from .sandbox import ContainerCapacity, Docker, detected_capacity, execution_plan, execution_policy
 from .server import main as serve
@@ -29,6 +31,14 @@ from .terminal import Terminal
 
 IDENTIFIER = re.compile(r"[0-9a-f]{16}\Z")
 MISSING = object()
+PROVIDER_NAMES = {"demo": "Offline demo", "foundry": "Microsoft Foundry", "azure-gateway": "Azure AI Gateway",
+                  "compatible": "Compatible Chat Completions", "local": "Local model",
+                  **{kind: name for kind, (name, _) in AGENT_CLIS.items()}}
+SETUP_CHOICES = {"1": "claude-code", "2": "github-copilot", "3": "foundry", "4": "local"}
+LOCAL_MODEL_ENDPOINT = "http://127.0.0.1:11434/v1"
+LAP_STAGES = dict(zip(STAGES, ("Strategy", "Technical Design", "Experience Design", "Build", "Systems Test",
+                             "Track Release"), strict=True))
+LAP_STAGES["lead"] = "Run plan"
 
 
 class RemoteWorkspace:
@@ -59,8 +69,14 @@ class RemoteWorkspace:
     def projects(self):
         return self.request("/api/workspace")["projects"]
 
-    def create(self, name):
-        return self.request("/api/projects", {"name": name})
+    def create(self, name, repository=None, branch=None):
+        if repository or branch:
+            require(self.about.get("capabilities", {}).get("github_racedays"),
+                    "Restart the Pit Wall server to connect a GitHub repository")
+        return self.request("/api/projects", {"name": name, "github_url": repository, "github_branch": branch})
+
+    def publish(self, session):
+        return self.request(f"/api/sessions/{session}/publish", {})
 
     def sessions(self, project):
         return self.request(f"/api/projects/{project}/sessions")["sessions"]
@@ -73,10 +89,10 @@ class RemoteWorkspace:
         return self.request(f"/api/sessions/{session}/telemetry?{query}")
 
     def configure(self, settings):
-        self.request("/api/provider", settings)
+        return self.request("/api/provider", settings)
 
     def provider(self):
-        return self.about["provider"]
+        return self.request("/api/workspace")["provider"]
 
     def models(self, settings, key):
         return self.request("/api/provider/models", {**settings, "api_key": key})
@@ -131,8 +147,13 @@ class LocalWorkspace:
     def projects(self):
         return self.store.projects()
 
-    def create(self, name):
-        return self.store.project(name, "")
+    def create(self, name, repository=None, branch=None):
+        if self.lead is None and not (repository or branch):
+            return self.store.project(name, "")
+        return self.lead.create_project(name, repository=repository, branch=branch)
+
+    def publish(self, session):
+        return self.lead.publish(session)
 
     def sessions(self, project):
         return self.store.rows("""SELECT id,project_id,prompt,state,stage,branch,created,updated,error FROM sessions
@@ -140,11 +161,11 @@ class LocalWorkspace:
 
     def status(self, session):
         result = self.store.summary(session)
-        require(result, "Session does not exist")
+        require(result, "Lap does not exist")
         return result
 
     def events(self, session, event=None, **filters):
-        require(self.store.row("SELECT id FROM sessions WHERE id=?", (session,)), "Session does not exist")
+        require(self.store.row("SELECT id FROM sessions WHERE id=?", (session,)), "Lap does not exist")
         if event is not None:
             result = self.store.row("SELECT * FROM events WHERE session_id=? AND id=?", (session, event))
             require(result, "Event does not exist")
@@ -152,9 +173,11 @@ class LocalWorkspace:
         return self.store.telemetry(session, **filters)
 
     def configure(self, settings):
-        self.lead.configure(settings)
+        return self.lead.configure(settings)
 
     def provider(self):
+        if self.lead:
+            return self.lead.provider()
         return self.store.setting("provider") or initial_provider(require_model=False)
 
     def models(self, settings, key):
@@ -187,6 +210,8 @@ class LocalWorkspace:
         return check_workspace(Docker(), self.store, provider_check)
 
     def provider_test(self):
+        if self.lead:
+            return self.lead.test_provider()
         settings = initial_provider() if environment_provider() else self.provider()
         key = provider_key(settings["kind"]) or self.credentials.get(settings)
         self.store.redact.add(key)
@@ -208,7 +233,7 @@ class LocalWorkspace:
         if self.lead:
             self.lead.cancel(session)
         else:
-            require(self.store.cancel(session), "Session is inactive or already stopping")
+            require(self.store.cancel(session), "Lap is inactive or already stopping")
 
     def retry(self, session):
         self.lead.retry(session)
@@ -238,7 +263,7 @@ def workspace(args):
     remote = remote_workspace(args.data, getattr(args, "connect", None))
     if remote is not None:
         yield remote
-    elif args.command in ("chat", "run", "retry", "preview"):
+    elif args.command in ("chat", "run", "retry", "preview", "new-raceday", "publish"):
         with workspace_lock(args.data):
             lead = Lead(args.data)
             try:
@@ -255,11 +280,11 @@ def project_id(backend, name, create=False):
     if exact:
         return exact
     matches = [project["id"] for project in projects if project["name"] == name]
-    require(len(matches) <= 1, "Project name is ambiguous. Use its ID.")
+    require(len(matches) <= 1, "RaceDay name is ambiguous. Use its ID.")
     if matches:
         return matches[0]
-    require(create and not IDENTIFIER.fullmatch(name), "Project does not exist")
-    require(0 < len(name.strip()) <= 100, "Enter a project name up to 100 characters")
+    require(create and not IDENTIFIER.fullmatch(name), "RaceDay does not exist")
+    require(0 < len(name.strip()) <= 100, "Enter a RaceDay name up to 100 characters")
     return backend.create(name.strip())["id"]
 
 
@@ -275,11 +300,12 @@ class ChatShell:
         self.terminal = Terminal(not args.no_animation)
         self.project = args.project
         self.session = None
+        self.use_environment_provider = bool(environment_provider())
         if args.session:
             self.attach(args.session)
 
     def attach(self, sid):
-        require(IDENTIFIER.fullmatch(sid), "Enter a valid session ID")
+        require(IDENTIFIER.fullmatch(sid), "Enter a valid lap ID")
         session = self.backend.status(sid)
         self.project = session["project_id"]
         self.session = sid
@@ -287,31 +313,37 @@ class ChatShell:
     def start(self, request, *, demo=False):
         if not demo:
             require(request, "Enter a request after /run")
-            configure_environment_provider(self.backend)
+            if self.use_environment_provider:
+                configure_environment_provider(self.backend)
+            settings = self.backend.provider()
+            require(settings["kind"] != "demo",
+                    "Use /setup to choose a model provider or /demo to try Fieldwork offline")
+            require(settings["kind"] != "foundry" or settings.get("has_key") is not False,
+                    "Microsoft Foundry needs a credential. Use /setup to enter it")
         project = self.project or ("Workshop demo" if demo else "Workspace")
         identifier = project_id(self.backend, project, create=True)
         self.session = self.backend.run(identifier, request, demo)
         self.project = identifier
-        self.terminal.write(f"{self.session}. Ask the Lead a question or use /watch.", label="Queued ", tone="gold")
+        self.terminal.write(f"{self.session}. Ask the race engineer or use /watch.", label="Queued lap ", tone="gold")
 
     def ask(self, message):
         question = self.backend.chat(self.session, message)
         deadline = time.monotonic() + 45
-        with self.terminal.waiting("Waiting for the Lead") as pause:
+        with self.terminal.waiting("Waiting for Team Radio") as pause:
             while time.monotonic() < deadline:
                 reply = self.backend.chat_reply(self.session, question)
                 if reply:
-                    self.terminal.write(reply["text"], label="Lead > ")
+                    self.terminal.write(reply["text"], label="Race Engineer > ")
                     return
                 pause(0.4)
-        self.terminal.write("The Lead is still working on your question. Use /messages to check for the reply.")
+        self.terminal.write("The race engineer is working on your question. Check /messages for the reply.")
 
     def show_status(self, *, watch=False):
         previous = None
         with (self.terminal.waiting("Watching the run") if watch else nullcontext()) as pause:
             while True:
                 session = self.backend.status(self.session)
-                stage = LABELS.get(session["stage"], "Lead plan")
+                stage = LAP_STAGES.get(session["stage"], LAP_STAGES["lead"])
                 passed = sum(gate["state"] == "passed" for gate in session["gates"])
                 snapshot = (session["state"], stage, passed)
                 if snapshot != previous:
@@ -324,40 +356,138 @@ class ChatShell:
                     return
                 pause(0.5)
 
+    def provider_status(self, *, test=False):
+        if test and self.use_environment_provider:
+            configure_environment_provider(self.backend)
+        try:
+            settings = (initial_provider(require_model=False) if self.use_environment_provider and not test
+                        else self.backend.provider())
+        except ValueError as exc:
+            self.terminal.write(f"{exc}. Use /setup for guided provider setup.", tone="coral")
+            return
+        if settings["kind"] == "demo":
+            self.terminal.write("No model provider configured. Use /setup to choose a provider or /demo to try Fieldwork offline.")
+        elif settings["kind"] == "foundry" and settings.get("has_key") is False:
+            self.terminal.write("Microsoft Foundry needs a credential. Use /setup to enter it.")
+        elif test:
+            result = self.backend.provider_test()
+            self.terminal.write(f"{PROVIDER_NAMES[result['kind']]} responded via {result['model']}.")
+        else:
+            default = "CLI default model" if settings["kind"] in AGENT_CLIS else "automatic deployment routing"
+            details = settings.get("model") or default
+            self.terminal.write(f"Provider  {PROVIDER_NAMES[settings['kind']]} · {details}")
+            self.terminal.write("Use /run to submit work, /provider test to check the connection, or /setup to change it.")
+
+    def setup_foundry(self):
+        self.terminal.write("Connect Microsoft Foundry", tone="cyan")
+        self.terminal.write("Open https://ai.azure.com, select your project, then copy the Project endpoint and API key from Home.")
+        endpoint = input("Project endpoint (Enter to cancel): ").strip()
+        if not endpoint:
+            return
+        settings = provider_settings({"kind": "foundry", "endpoint": endpoint}, require_model=False)
+        if foundry_project_endpoint(settings):
+            self.terminal.write("Pit Crew Harness will find the project's chat deployments and choose one for each role.")
+        else:
+            settings["model"] = input("Deployment name: ").strip()
+            settings = provider_settings(settings)
+        self.terminal.write("The key entry is hidden.")
+        key = prompt_credential().strip()
+        return (settings, key) if key else None
+
+    def setup_local_model(self):
+        self.terminal.write("Start your local OpenAI-compatible model server on the machine running Pit Crew Harness.")
+        endpoint = input(f"API base URL [{LOCAL_MODEL_ENDPOINT}]: ").strip() or LOCAL_MODEL_ENDPOINT
+        settings = provider_settings({"kind": "local", "endpoint": endpoint}, require_model=False)
+        model = input("Model ID (Enter to discover): ").strip()
+        key = prompt_credential("API key (Enter if your local server doesn't require one): ").strip()
+        if not model:
+            models = self.backend.models(settings, key)["models"]
+            require(models, "Start or download a model on your local server, then try /setup again")
+            if len(models) == 1:
+                model = models[0]["id"]
+            else:
+                self.terminal.write("Available model IDs\n" + "\n".join(item["id"] for item in models))
+                model = input("Model ID (Enter to cancel): ").strip()
+                if not model:
+                    return None
+        return {**settings, "model": model}, key
+
+    def setup_provider(self, choice):
+        if not choice:
+            self.terminal.write("Choose a model provider", tone="cyan")
+            for option, kind in SETUP_CHOICES.items():
+                self.terminal.write(f"  {option}. {PROVIDER_NAMES[kind]}")
+            choice = input("Selection (Enter to cancel): ").strip()
+        if not choice:
+            return
+        kind = SETUP_CHOICES.get(choice, choice)
+        require(kind in SETUP_CHOICES.values(), "Choose a provider listed in /setup")
+        if kind == "foundry":
+            connection = self.setup_foundry()
+        elif kind == "local":
+            connection = self.setup_local_model()
+        else:
+            self.terminal.write(f"Install {PROVIDER_NAMES[kind]} on the machine running Pit Crew Harness.")
+            login = "Run `claude auth login`" if kind == "claude-code" else "Run `copilot` and enter `/login`"
+            self.terminal.write(f"{login} in another terminal if you need to sign in.")
+            model = input("Model ID (Enter to use the CLI default): ").strip()
+            connection = {"kind": kind, "model": model}, ""
+        if connection is None:
+            return
+        settings, key = connection
+        remember = bool(key) and self.backend.provider().get("keyring_available", False) and (
+            input("Remember the credential in the system keyring? [y/N]: ").strip().lower() in ("y", "yes"))
+        self.terminal.write("Checking the connection with a short model request…")
+        configured = self.backend.configure({**settings, "api_key": key, "remember_key": remember, "test_connection": True})
+        self.use_environment_provider = False
+        result = configured.get("connection_test") or self.backend.provider_test()
+        self.terminal.write(f"{PROVIDER_NAMES[kind]} responded via {result['model']}.")
+        if remember:
+            self.terminal.write("Credential saved in the system keyring.")
+        elif key:
+            self.terminal.write("The credential stays in the running workspace process.")
+        self.terminal.write("Enter what you want to build, or use /run to start a new request here.")
+
     def command(self, command, arg):
         if command in ("/status", "/watch", "/messages", "/cancel", "/retry"):
-            require(self.session, "Start a run or select a session with /resume SESSION_ID")
+            require(self.session, "Start a lap or select one with /resume LAP_ID")
         if command in ("/status", "/watch"):
             self.show_status(watch=command == "/watch")
         elif command == "/run":
             self.start(arg)
         elif command == "/demo":
             self.start("", demo=True)
+        elif command == "/setup":
+            self.setup_provider(arg)
+        elif command == "/provider":
+            require(arg in ("", "test"), "Use /provider or /provider test")
+            self.provider_status(test=arg == "test")
         elif command == "/resume":
             self.attach(arg)
             self.show_status()
-        elif command == "/project":
-            require(0 < len(arg) <= 100, "Enter a project name or ID after /project")
+        elif command in ("/raceday", "/garage", "/project"):
+            require(0 < len(arg) <= 100, "Enter a RaceDay name or ID")
             self.project, self.session = arg, None
-            self.terminal.write(f"Project set to {arg}. Enter a request to start a run.")
-        elif command == "/projects":
+            self.terminal.write(f"RaceDay set to {arg}. Enter a brief to start a lap.")
+        elif command in ("/racedays", "/garages", "/projects"):
             projects = self.backend.projects()
             for project in projects:
                 self.terminal.write(f"{project['id']}  {project['name']}")
             if not projects:
-                self.terminal.write("No projects yet.")
-        elif command == "/sessions":
-            require(self.project, "Select a project with /project NAME or ID")
+                self.terminal.write("No RaceDays yet.")
+        elif command in ("/laps", "/stints", "/sessions"):
+            require(self.project, "Select a RaceDay with /raceday NAME or ID")
             sessions = self.backend.sessions(project_id(self.backend, self.project))
             for session in sessions[:12]:
                 request = " ".join(session["prompt"].split())[:72]
                 self.terminal.write(f"{session['id']}  {session['state']:9}  {request}")
             if not sessions:
-                self.terminal.write("No sessions yet.")
+                self.terminal.write("No laps yet.")
         elif command == "/messages":
             for message in self.backend.status(self.session)["messages"][-12:]:
-                tone = "mint" if message["speaker"] == "lead" else "lilac"
-                self.terminal.write(message["text"], label=f"{message['speaker'].title()} > ", tone=tone)
+                engineer = message["speaker"] == "lead"
+                speaker = "Race Engineer" if engineer else message["speaker"].title()
+                self.terminal.write(message["text"], label=f"{speaker} > ", tone="mint" if engineer else "lilac")
         elif command == "/cancel":
             self.backend.cancel(self.session)
             self.terminal.write("Cancellation requested.")
@@ -365,17 +495,19 @@ class ChatShell:
             self.backend.retry(self.session)
             self.terminal.write(f"Queued {self.session} to retry.")
         elif command == "/help":
-            self.terminal.write("""Enter a request to start a run. With a session selected, plain text asks the Lead.
-  /run REQUEST     Start a new run or change the requirements
-  /demo            Start the offline Fieldwork demo
-  /project NAME    Choose a project for your next run
-  /projects        List projects
-  /sessions        List recent sessions in the current project
-  /resume ID       Select a previous session for chat
-  /status /watch   Check the selected run or watch it finish
-  /messages        Read recent conversation and updates
-  /cancel /retry   Request cancellation or retry the selected run
-  /exit            Leave the terminal""")
+            self.terminal.write("""Enter a brief to start a lap. With a lap selected, plain text goes to Team Radio.
+  /run REQUEST     Start a new lap or change the requirements
+  /demo            Start the offline Fieldwork practice run
+  /setup           Choose and connect a model provider
+  /provider        Show the selected provider or use /provider test
+  /raceday NAME    Choose a RaceDay for your next lap
+  /racedays        List RaceDays
+  /laps            List recent laps in the current RaceDay
+  /resume ID       Select a previous lap for Team Radio
+  /status /watch   Check the selected lap or watch it finish
+  /messages        Read Team Radio and lap updates
+  /cancel /retry   Request cancellation or retry the selected lap
+  exit, /exit      Leave the terminal""")
         else:
             self.terminal.write("Unknown command. Enter /help for commands.")
 
@@ -386,17 +518,20 @@ class ChatShell:
         except ImportError:
             readline_enabled = False
         self.terminal.banner()
-        self.terminal.write("Ask the Lead about this run." if self.session else
-                            "Describe what you want to build, or enter /demo.")
         if self.session:
+            self.terminal.write("Ask the race engineer about this lap.")
             self.show_status()
-        elif self.project:
-            self.terminal.write(f"Project  {self.project}")
+        else:
+            if self.project:
+                self.terminal.write(f"RaceDay  {self.project}")
+            self.provider_status()
         while True:
             try:
                 line = input(self.terminal.prompt(self.session is not None, readline=readline_enabled)).strip()
                 if not line:
                     continue
+                if line.casefold() == "exit":
+                    return
                 if line.startswith("/"):
                     command, *args = line.split(maxsplit=1)
                     if command in ("/exit", "/quit"):
@@ -410,7 +545,7 @@ class ChatShell:
                 self.terminal.write()
                 return
             except KeyboardInterrupt:
-                self.terminal.write("\nEnter /exit to leave or /cancel to stop the selected run.")
+                self.terminal.write("\nType exit to leave or /cancel to stop the selected run.")
             except (ValueError, OSError, RuntimeError, http.client.HTTPException, sqlite3.Error) as exc:
                 self.terminal.write(exc, label="Error: ", tone="coral")
 
@@ -423,7 +558,7 @@ def progress(backend, sid):
                    tuple((gate["stage"], gate["state"], (gate["details"] or {}).get("attempt"))
                          for gate in session["gates"]))
         if current != previous:
-            stage = LABELS.get(session["stage"], "Lead plan")
+            stage = LAP_STAGES.get(session["stage"], LAP_STAGES["lead"])
             gate = next((gate for gate in session["gates"] if gate["stage"] == session["stage"]), None)
             attempt = (gate.get("details") or {}).get("attempt") if gate else None
             suffix = f" · attempt {attempt}" if attempt else ""
@@ -435,9 +570,13 @@ def progress(backend, sid):
 
 
 def print_status(session):
-    label = LABELS.get(session["stage"], "Lead plan")
+    label = LAP_STAGES.get(session["stage"], LAP_STAGES["lead"])
     print(f"{session['id']}  {session['state']}  {label}")
     print(f"Branch  {session['branch']}")
+    if session.get("github_commit"):
+        print(f"GitHub commit  {session['github_commit']}")
+    if session.get("github_published"):
+        print(f"GitHub branch  {session['github_published']}")
     if session.get("bundle"):
         print(f"Build   {session['bundle']}")
     if session.get("preview"):
@@ -480,7 +619,7 @@ def logs(backend, args):
 
 
 def wait_command(backend, sid, json_output):
-    print(f"Session {sid}", file=sys.stderr, flush=True)
+    print(f"Lap {sid}", file=sys.stderr, flush=True)
     try:
         result = progress(backend, sid)
     except KeyboardInterrupt:
@@ -502,11 +641,11 @@ def wait_command(backend, sid, json_output):
     return 0 if result["state"] == "completed" else 1
 
 
-def prompt_credential():
+def prompt_credential(prompt="Provider credential: "):
     with warnings.catch_warnings():
         warnings.simplefilter("error", getpass.GetPassWarning)
         try:
-            return getpass.getpass("Provider credential: ")
+            return getpass.getpass(prompt)
         except (getpass.GetPassWarning, EOFError):
             raise ValueError("Use an interactive terminal or supply the credential with --from-env") from None
 
@@ -543,7 +682,7 @@ def run_action(args, backend):
                 print(f"Docker engine  {capacity['cpu']} CPU  {capacity['ram']} MiB")
             else:
                 print("Docker unavailable. Showing reference sizes.")
-            print(f"Concurrent sessions  {policy['sessions']}")
+            print(f"Concurrent laps  {policy['sessions']}")
             print("Independent reviewers per gate  " + ("2" if policy["parallel_reviews"] else "1"))
             for task, limits in policy["limits"].items():
                 sizing = "custom" if task in policy["overrides"] else "auto"
@@ -563,6 +702,7 @@ def run_action(args, backend):
                       else "The endpoint returned no model IDs.")
         else:
             require(settings["kind"] != "demo", "Choose a model provider in Provider settings or set its environment variables")
+            require(settings["kind"] not in AGENT_CLIS, "This provider uses its own CLI sign-in")
             remember = args.action == "save"
             require(remember or not args.from_env, "--from-env applies to credential save")
             key = ""
@@ -599,6 +739,10 @@ def run_action(args, backend):
         result = backend.provider_test()
         print(json.dumps(result) if json_output else f"Model responded via {result['kind']}  {result['model']}")
         return 0
+    if args.command == "new-raceday":
+        project = backend.create(args.name, args.github, args.branch)
+        print(json.dumps(project, ensure_ascii=False) if json_output else f"{project['id']}  {project['name']}")
+        return 0
     if args.command in ("projects", "sessions"):
         if args.command == "projects":
             items = backend.projects()
@@ -626,7 +770,7 @@ def run_action(args, backend):
                     prompt = source.read(16_001)
         require(args.demo or isinstance(prompt, str) and 0 < len(prompt.strip()) <= 16_000,
                 "Provide a request up to 16,000 characters or use --demo")
-        require(args.demo or getattr(args, "project", None), "Specify --project for a custom request")
+        require(args.demo or getattr(args, "project", None), "Specify --raceday for a custom lap")
         if not args.demo:
             configure_environment_provider(backend)
         project = project_id(backend, args.project or "Workshop demo", create=True)
@@ -636,7 +780,11 @@ def run_action(args, backend):
             return 0
         return wait_command(backend, sid, json_output)
     sid = args.session
-    require(IDENTIFIER.fullmatch(sid), "Enter a valid session ID")
+    require(IDENTIFIER.fullmatch(sid), "Enter a valid lap ID")
+    if args.command == "publish":
+        published = backend.publish(sid)
+        print(json.dumps(published, ensure_ascii=False) if json_output else published["url"])
+        return 0
     if args.command == "status":
         session = backend.status(sid)
         if json_output:
@@ -671,15 +819,15 @@ def parser_for_cli():
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument("--data", type=Path, default=argparse.SUPPRESS, help="Workspace directory")
     shared.add_argument("--connect", type=int, default=argparse.SUPPRESS, metavar="PORT",
-                        help="Connect to an explicit loopback RittaiHarness port")
+                        help="Connect to an explicit loopback Pit Crew Harness port")
     shared.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Machine-readable output")
-    parser = argparse.ArgumentParser(prog="rittaiharness", description=__doc__, parents=[shared])
+    parser = argparse.ArgumentParser(prog="pitcrew", description=__doc__, parents=[shared])
     parser.add_argument("--port", type=int, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     parser.add_argument("--doctor", action="store_true", help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command")
     options = {
-        "chat": "Open the interactive terminal workspace",
-        "serve": "Start the dashboard and loopback API", "doctor": "Check Docker and the role images",
+        "chat": "Open the interactive terminal and Team Radio",
+        "serve": "Start Pit Wall and its loopback API", "doctor": "Check Docker and the role images",
         "extensions": "List or check configured Skills and MCP tools",
         "execution": "Show or apply task limits and parallel execution settings",
         "backup": "Back up the stopped workspace database, Git history, and builds",
@@ -688,19 +836,32 @@ def parser_for_cli():
         "models": "List Foundry project deployments or model IDs from other providers",
         "credential": "Save or forget the provider credential in the system keyring",
         "provider-test": "Send a connectivity check to the configured model",
-        "run": "Run a request or the built-in demo", "projects": "List projects", "sessions": "List sessions",
-        "status": "Show the session and build status", "logs": "Read or follow filtered session logs",
+        "new-raceday": "Create a RaceDay and optionally connect a GitHub repository",
+        "run": "Start a lap or the built-in practice run", "projects": "List RaceDays", "sessions": "List laps",
+        "status": "Show lap and build status", "logs": "Read or follow filtered lap telemetry",
         "retry": "Resume at the first unapproved stage", "cancel": "Request cancellation",
         "preview": "Start or stop a completed web preview",
+        "publish": "Push an approved lap commit to its own GitHub branch",
+    }
+    command_names = {
+        "projects": ("racedays", "garages", "projects"),
+        "sessions": ("laps", "stints", "sessions"),
+        "logs": ("telemetry", "logs"),
+        "extensions": ("toolbox", "extensions"),
+        "execution": ("pit-setup", "garage-setup", "execution"),
     }
     for name, explanation in options.items():
-        command = commands.add_parser(name, help=explanation, parents=[shared])
+        displayed, *aliases = command_names.get(name, (name,))
+        command = commands.add_parser(displayed, aliases=aliases, help=explanation, parents=[shared])
+        command.set_defaults(command=name)
         if name == "serve":
             command.add_argument("--port", type=int, default=argparse.SUPPRESS)
         if name == "chat":
             selection = command.add_mutually_exclusive_group()
-            selection.add_argument("--project", help="Project name or ID for new runs")
-            selection.add_argument("--session", metavar="SESSION_ID", help="Resume the conversation for a session")
+            selection.add_argument("--raceday", "--garage", "--project", dest="project", metavar="RACEDAY",
+                                   help="RaceDay name or ID for new laps")
+            selection.add_argument("--lap", "--stint", "--session", dest="session", metavar="LAP_ID",
+                                   help="Resume Team Radio for a lap")
             command.add_argument("--no-animation", action="store_true", help="Show a static logo and plain wait messages")
         if name == "extensions":
             command.add_argument("--check", action="store_true", help="Connect and discover approved MCP tools")
@@ -722,13 +883,18 @@ def parser_for_cli():
             command.add_argument("action", choices=("save", "forget"))
             command.add_argument("--from-env", action="store_true", help="Save an existing provider environment credential")
         if name in ("run", "sessions"):
-            command.add_argument("--project", help="Project name or ID")
+            command.add_argument("--raceday", "--garage", "--project", dest="project", metavar="RACEDAY",
+                                 help="RaceDay name or ID")
         if name == "run":
             command.add_argument("prompt", nargs="?")
             command.add_argument("--prompt-file", help="Read the request from a file or '-' for stdin")
             command.add_argument("--demo", action="store_true", help="Run the bundled sample without an API key")
-        if name in ("status", "logs", "retry", "cancel", "preview"):
-            command.add_argument("session", metavar="SESSION_ID")
+        if name == "new-raceday":
+            command.add_argument("name")
+            command.add_argument("--github", metavar="URL", help="GitHub HTTPS repository URL")
+            command.add_argument("--branch", help="Source branch. Defaults to the repository default branch.")
+        if name in ("status", "logs", "retry", "cancel", "preview", "publish"):
+            command.add_argument("session", metavar="LAP_ID")
         if name in ("run", "retry"):
             command.add_argument("--detach", action="store_true", help="Queue the run on the dashboard and return")
         if name == "logs":
@@ -746,7 +912,7 @@ def parser_for_cli():
 def main(argv=None):
     parser = parser_for_cli()
     args = parser.parse_args(argv)
-    args.data = getattr(args, "data", Path(os.environ.get("OMNI_DATA", ".omni-data"))).resolve()
+    args.data = getattr(args, "data", default_workspace()).resolve()
     if (args.command is None and not hasattr(args, "port") and not getattr(args, "json", False)
             and sys.stdin.isatty() and sys.stdout.isatty()):
         args.command, args.project, args.session, args.no_animation = "chat", None, None, False
@@ -754,7 +920,7 @@ def main(argv=None):
     try:
         if args.doctor or args.command == "doctor" and not args.full:
             Docker().doctor()
-            print("Docker and RittaiHarness images are ready.")
+            print("Docker and Pit Crew Harness images are ready.")
             return
         if args.command in (None, "serve"):
             serve(["--port", str(port), "--data", str(args.data)])
@@ -786,4 +952,4 @@ def main(argv=None):
     except KeyboardInterrupt:
         raise SystemExit(130)
     except (ValueError, OSError, RuntimeError, http.client.HTTPException, sqlite3.Error, BadZipFile) as exc:
-        parser.exit(1, f"rittaiharness: {exc}\n")
+        parser.exit(1, f"pitcrew: {exc}\n")

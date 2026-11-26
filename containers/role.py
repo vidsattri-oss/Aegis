@@ -3,7 +3,7 @@ import json
 import subprocess
 import sys
 
-from omni.role_tools import FRAME_LIMIT, ROLE_TOOLS, invoke
+from pitcrew.role_tools import FRAME_LIMIT, ROLE_TOOLS, invoke
 
 
 def main():

@@ -2,26 +2,55 @@ import os
 import tempfile
 import time
 import unittest
+from contextlib import chdir
 from pathlib import Path
 from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
-from omni.continuity import backup_workspace, restore_workspace
-from omni.extensions import server_from
-from omni.preflight import check_workspace
-from omni.repository import Repository
-from omni.sandbox import ContainerCapacity, Docker, profile
-from omni.store import Store
+from pitcrew.config import default_workspace
+from pitcrew.continuity import DATABASE, backup_workspace, restore_workspace
+from pitcrew.extensions import server_from
+from pitcrew.preflight import check_workspace
+from pitcrew.repository import Repository
+from pitcrew.sandbox import ContainerCapacity, Docker, profile
+from pitcrew.store import Store
 
 
 class LocalOperationsTest(unittest.TestCase):
+    def test_default_workspace_outside_a_checkout_uses_user_data_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            with (chdir(directory), patch.dict(os.environ, {}, clear=True),
+                  patch("pitcrew.config.Path.home", return_value=directory / "home")):
+                self.assertEqual(default_workspace(), directory / "home" / ".local/share/pitcrew")
+                with patch.dict(os.environ, {"XDG_DATA_HOME": str(directory / "data")}):
+                    self.assertEqual(default_workspace(), directory / "data/pitcrew")
+                with patch.dict(os.environ, {"XDG_DATA_HOME": "relative"}):
+                    self.assertEqual(default_workspace(), directory / "home" / ".local/share/pitcrew")
+                legacy = directory / ".omni-data"
+                legacy.mkdir()
+                self.assertEqual(default_workspace(), Path(".omni-data"))
+                (directory / ".pitcrew-data").mkdir()
+                self.assertEqual(default_workspace(), Path(".pitcrew-data"))
+                with patch.dict(os.environ, {"PITCREW_DATA": str(directory / "explicit")}):
+                    self.assertEqual(default_workspace(), directory / "explicit")
+
+    def test_fresh_checkout_uses_checkout_workspace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "Makefile").touch()
+            (directory / "pitcrew").mkdir()
+            (directory / "pitcrew" / "build.py").touch()
+            with chdir(directory), patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(default_workspace(), Path(".pitcrew-data"))
+
     def test_preflight_reports_mount_failure_and_keeps_model_calls_optional(self):
         with tempfile.TemporaryDirectory() as temp:
             store = Store(temp)
             docker = Mock()
             docker.doctor.return_value = {"cpu": 4, "ram": 2048}
             docker.probe_mounts.side_effect = RuntimeError("Permission denied")
-            with patch.dict(os.environ, {"OMNI_NPM_CACHE": ""}):
+            with patch.dict(os.environ, {"PITCREW_NPM_CACHE": ""}):
                 result = check_workspace(docker, store)
             self.assertFalse(result["ready"])
             self.assertEqual(result["checks"][1]["detail"], "Permission denied")
@@ -36,7 +65,7 @@ class LocalOperationsTest(unittest.TestCase):
         container, local = "a" * 64, "b" * 64
         data = (f'{{"Container":"{container}","CPUPerc":"125.00%","MemUsage":"1.25GiB / 4GiB"}}\n'
                 f'{{"Container":"{local}","CPUPerc":"80.00%","MemUsage":"300MiB / 384MiB"}}').encode()
-        with patch("omni.sandbox.run_command", side_effect=[Mock(stdout=local.encode()), Mock(stdout=data)]):
+        with patch("pitcrew.sandbox.run_command", side_effect=[Mock(stdout=local.encode()), Mock(stdout=data)]):
             external = Docker().external_usage("local")
         self.assertEqual(external, {"cpu": 1.25, "ram": 1280, "containers": 1})
         pressure = ContainerCapacity(lambda: external)
@@ -113,6 +142,23 @@ class LocalOperationsTest(unittest.TestCase):
             self.assertEqual(restored_repo.git(restored_repo.checkout(resumed), "rev-parse", "HEAD").stdout, head)
             with self.assertRaisesRegex(ValueError, "new workspace directory"):
                 restore_workspace(backup, destination)
+
+    def test_restore_accepts_verified_legacy_backup_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            store = Store(directory / "original")
+            for marker_text in ("RaceHarness workspace backup\n", "OtherStudio workspace backup\n"):
+                with self.subTest(marker_text=marker_text):
+                    backup = directory / "legacy.zip"
+                    with ZipFile(backup, "w") as archive:
+                        archive.writestr("raceharness-backup-v1", marker_text)
+                        archive.write(store.directory / DATABASE, DATABASE)
+                    if marker_text.startswith("RaceHarness"):
+                        restored = Store(restore_workspace(backup, directory / "restored"))
+                        self.assertNotEqual(restored.workspace_id(), store.workspace_id())
+                    else:
+                        with self.assertRaisesRegex(ValueError, "backup marker"):
+                            restore_workspace(backup, directory / "invalid")
 
 
 if __name__ == "__main__":

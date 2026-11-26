@@ -1,5 +1,7 @@
 import io
+import json
 import os
+import sys
 import tempfile
 import unittest
 from contextlib import closing, redirect_stdout
@@ -7,28 +9,175 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from omni.cli import ChatShell, LocalWorkspace
-from omni.engine import Lead
-from omni.integrations import provider_settings
-from omni.store import Store
+from pitcrew.cli import ChatShell, LocalWorkspace, parser_for_cli
+from pitcrew.engine import Lead
+from pitcrew.integrations import provider_settings
+from pitcrew.store import Store
+from pitcrew.terminal import SHINE_FRAMES, TWINKLE, Terminal
+from test_provider_models import FOUNDRY_PROJECT, FOUNDRY_RESOURCE, KeyringFixture
 from test_workspace import DockerFixture
 
 
 class CliChatTest(unittest.TestCase):
+    def test_foundry_setup_discovers_and_checks_a_deployment_before_a_run(self):
+        key = "fixture-foundry-credential"
+        replies = []
+
+        def model(settings, credential, persona, context, timeout):
+            replies.append((settings["model"], credential))
+            return "OK", (1, 1)
+
+        deployments = {"value": [{"type": "ModelDeployment", "name": "team-chat"}]}
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
+            keyring = KeyringFixture()
+            directory = Path(temp)
+            with closing(Lead(directory, model=model, keyring=keyring)) as lead, redirect_stdout(io.StringIO()) as output:
+                backend = LocalWorkspace(directory, lead)
+                chat = ChatShell(backend, SimpleNamespace(no_animation=True, project="Workshop", session=None))
+                inputs = ["/setup", "3", FOUNDRY_PROJECT, "y", "/provider test", "/run Build a local planner", "/exit"]
+                with (patch("builtins.input", side_effect=inputs),
+                      patch("pitcrew.cli.prompt_credential", return_value=key),
+                      patch("pitcrew.integrations.request", return_value=(json.dumps(deployments).encode(), "application/json")),
+                      patch.object(backend, "run", return_value="a" * 16) as run):
+                    chat.run()
+
+                self.assertIn("Use /setup to choose a provider", output.getvalue())
+                for name in ("Claude Code", "GitHub Copilot CLI", "Microsoft Foundry", "Local model"):
+                    self.assertIn(name, output.getvalue())
+                self.assertIn("copy the Project endpoint and API key from Home", output.getvalue())
+                self.assertIn("Microsoft Foundry responded via team-chat", output.getvalue())
+                self.assertNotIn(key, output.getvalue())
+                self.assertEqual(replies, [("team-chat", key)] * 2)
+                self.assertEqual(lead.provider()["kind"], "foundry")
+                self.assertEqual(list(keyring.values.values()), [key])
+                run.assert_called_once_with(chat.project, "Build a local planner", False)
+
+    def test_failed_foundry_setup_keeps_the_previous_provider(self):
+        key = "fixture-rejected-credential"
+
+        def reject_model(settings, credential, persona, context, timeout):
+            raise RuntimeError(f"Credential rejected: {credential}")
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
+            directory = Path(temp)
+            keyring = KeyringFixture()
+            with closing(Lead(directory, model=reject_model, keyring=keyring)) as lead, redirect_stdout(io.StringIO()) as output:
+                lead.configure({"kind": "compatible", "endpoint": "https://existing.example/v1", "model": "existing"})
+                chat = ChatShell(LocalWorkspace(directory, lead), SimpleNamespace(no_animation=True, project=None, session=None))
+                with (patch("builtins.input", side_effect=["/setup foundry", FOUNDRY_RESOURCE, "team-chat", "y", "/exit"]),
+                      patch("pitcrew.cli.prompt_credential", return_value=key)):
+                    chat.run()
+
+                self.assertIn("Credential rejected", output.getvalue())
+                self.assertNotIn(key, output.getvalue())
+                self.assertEqual(lead.provider()["model"], "existing")
+                self.assertEqual(keyring.values, {})
+
+    def test_local_setup_discovers_a_model_and_uses_the_loopback_api(self):
+        model_list = b'{"data":[{"id":"local-chat"}]}'
+        reply = b'{"choices":[{"message":{"content":"OK"}}]}'
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
+            directory = Path(temp)
+            with closing(Lead(directory)) as lead, redirect_stdout(io.StringIO()) as output:
+                chat = ChatShell(LocalWorkspace(directory, lead), SimpleNamespace(no_animation=True, project=None, session=None))
+                with (patch("builtins.input", side_effect=["/setup", "4", "", "", "/exit"]),
+                      patch("pitcrew.cli.prompt_credential", return_value=""),
+                      patch("pitcrew.integrations.request", side_effect=[(model_list, "application/json"),
+                                                                      (reply, "application/json")]) as request):
+                    chat.run()
+
+                self.assertIn("Local model responded via local-chat", output.getvalue())
+                self.assertEqual(lead.provider()["kind"], "local")
+                self.assertEqual([call.args[0] for call in request.call_args_list],
+                                 ["http://127.0.0.1:11434/v1/models", "http://127.0.0.1:11434/v1/chat/completions"])
+                self.assertEqual(request.call_args.kwargs["payload"]["model"], "local-chat")
+                with self.assertRaisesRegex(ValueError, "loopback URL"):
+                    provider_settings({"kind": "local", "endpoint": "https://remote.example/v1", "model": "other"})
+
+    def test_coding_cli_choices_check_the_signed_in_cli_in_an_empty_workspace(self):
+        for choice, kind, binary, required in (
+            ("1", "claude-code", "claude", ["--restricted", "--tools", "--disallowed-tools", "--no-session-persistence"]),
+            ("2", "github-copilot", "copilot", ["--available-tools=view", "--deny-tool=view", "--sync-session=off"]),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                executable = directory / binary
+                response = '{"result":"OK","usage":{"input_tokens":1,"output_tokens":1}}' if binary == "claude" else "OK"
+                executable.write_text(f"#!{sys.executable}\n"
+                                      "import os, sys\n"
+                                      f"assert set({required!r}).issubset(sys.argv)\n"
+                                      "assert '--model=team-model' in sys.argv\n"
+                                      "assert not os.listdir()\n"
+                                      "assert 'PITCREW_API_KEY' not in os.environ\n"
+                                      "assert 'Pit Crew Harness provider connectivity' in sys.stdin.read()\n"
+                                      f"print({response!r})\n")
+                executable.chmod(0o700)
+                env = {"PATH": os.pathsep.join((str(directory), os.environ.get("PATH", ""))),
+                       "PITCREW_PROVIDER": "demo", "PITCREW_API_KEY": "unrelated-fixture-secret"}
+                with (patch.dict(os.environ, env), closing(Lead(directory / "workspace")) as lead,
+                      redirect_stdout(io.StringIO()) as output,
+                      patch("builtins.input", side_effect=["/setup", choice, "team-model", "/provider test", "/exit"])):
+                    chat = ChatShell(LocalWorkspace(directory, lead), SimpleNamespace(no_animation=True, project=None, session=None))
+                    chat.run()
+                    self.assertEqual(lead.provider()["kind"], kind)
+                    self.assertEqual(output.getvalue().count("responded via team-model"), 2)
+                    self.assertNotIn("unrelated-fixture-secret", output.getvalue())
+
     def test_demo_run_and_conversation_from_the_terminal(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"OMNI_PROVIDER": "demo"}):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
             directory = Path(temp)
             with closing(Lead(directory, docker=DockerFixture())) as lead, redirect_stdout(io.StringIO()) as output:
                 args = SimpleNamespace(no_animation=True, project="Workshop", session=None)
                 chat = ChatShell(LocalWorkspace(directory, lead), args)
-                with patch("builtins.input", side_effect=["/demo", "/watch", "How many approvals passed?", "/exit"]):
+                with (patch("builtins.input", side_effect=["/demo", "/watch", "How many approvals passed?", "exit"]),
+                      patch.object(chat, "ask", wraps=chat.ask) as ask):
                     chat.run()
+                ask.assert_called_once_with("How many approvals passed?")
                 text = output.getvalue()
-                self.assertIn("R I T T A I H A R N E S S", text)
+                self.assertIn("Pit Crew Harness", text)
+                self.assertIn("=========|", text)
                 self.assertIn("completed", text)
-                self.assertIn("Lead > The session is completed.", text)
+                self.assertIn("Race Engineer > The lap is completed.", text)
                 self.assertIn("7 of 7 gates", text)
                 self.assertNotIn("\x1b", text)
+
+    def test_plain_exit_does_not_start_a_stint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            with closing(Lead(directory, docker=DockerFixture())) as lead, redirect_stdout(io.StringIO()):
+                args = SimpleNamespace(no_animation=True, project=None, session=None)
+                chat = ChatShell(LocalWorkspace(directory, lead), args)
+                with (patch("builtins.input", side_effect=["  EXIT  ", "/exit"]),
+                      patch.object(chat, "start") as start):
+                    chat.run()
+                start.assert_not_called()
+
+    def test_motorsport_commands_alias_existing_cli_actions(self):
+        parser = parser_for_cli()
+        command_aliases = {
+            "racedays": ("garages", "projects"), "laps": ("stints", "sessions"),
+            "telemetry": ("logs",), "toolbox": ("extensions",), "pit-setup": ("garage-setup", "execution"),
+        }
+        for name, aliases in command_aliases.items():
+            arguments = ["0123456789abcdef"] if name == "telemetry" else []
+            for alias in aliases:
+                self.assertEqual(parser.parse_args([name, *arguments]), parser.parse_args([alias, *arguments]))
+        for option in ("--raceday", "--garage", "--project"):
+            self.assertEqual(parser.parse_args(["run", option, "Workshop"]).project, "Workshop")
+        for option in ("--lap", "--stint", "--session"):
+            self.assertEqual(parser.parse_args(["chat", option, "0123456789abcdef"]).session, "0123456789abcdef")
+
+    def test_banner_sweeps_before_twinkle_and_fits_a_narrow_terminal(self):
+        terminal = Terminal(animation=False)
+        terminal.palette = {}
+        early = terminal.banner_frame(2, 80)
+        later = terminal.banner_frame(5, 80)
+        self.assertNotEqual(early, later)
+        self.assertNotIn("*", "".join(later))
+        sparkle = terminal.banner_frame(SHINE_FRAMES + TWINKLE.index("*"), 80)
+        self.assertTrue(sparkle[1].endswith("*"))
+        self.assertNotIn("*", "".join(sparkle[2:]))
+        self.assertEqual(terminal.banner_frame(SHINE_FRAMES, 20), ["Pit Crew Harness", "/help for commands"])
 
     def test_follow_up_gets_the_previous_turn_and_its_own_reply(self):
         requests = []
@@ -37,7 +186,7 @@ class CliChatTest(unittest.TestCase):
             requests.append(context)
             return '{"answer":"The last gate passed."}', (0, 0)
 
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"OMNI_PROVIDER": "demo"}):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
             with closing(Lead(Path(temp), model=model)) as lead:
                 store = lead.store
                 project = store.project("Workshop", "")

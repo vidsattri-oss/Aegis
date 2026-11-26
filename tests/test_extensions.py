@@ -9,12 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import test_workspace
-from omni import demo
-from omni.engine import Lead
-from omni.extensions import Extensions
-from omni.integrations import complete, initial_provider, provider_key, provider_settings
-from omni.mcp import Client, StreamableHTTP
-from omni.store import Redactor
+from pitcrew import demo
+from pitcrew.engine import Lead
+from pitcrew.extensions import Extensions
+from pitcrew.integrations import complete, initial_provider, provider_key, provider_settings
+from pitcrew.mcp import Client, StreamableHTTP
+from pitcrew.store import Redactor
 
 GATEWAY = "https://example.eastus2-01.ai.gateway.azure.com/default/models/openai/v1/chat/completions"
 
@@ -47,13 +47,13 @@ for line in sys.stdin:
 
 class ExtensionTest(unittest.TestCase):
     def test_gateway_uses_exact_endpoint_alias_and_runtime_bearer_key(self):
-        with patch.dict(os.environ, {"OMNI_PROVIDER": "azure-gateway", "AI_GATEWAY_CHAT_URL": GATEWAY,
+        with patch.dict(os.environ, {"PITCREW_PROVIDER": "azure-gateway", "AI_GATEWAY_CHAT_URL": GATEWAY,
                                      "AI_GATEWAY_MODEL": "project/test-alias", "AI_GATEWAY_API_KEY": "fixture-gateway-key"}):
             settings = initial_provider()
             key = provider_key(settings["kind"])
         response = {"choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 12, "completion_tokens": 1}}
-        with patch("omni.integrations.request", return_value=(json.dumps(response).encode(), "application/json")) as request:
+        with patch("pitcrew.integrations.request", return_value=(json.dumps(response).encode(), "application/json")) as request:
             self.assertEqual(complete(settings, key, "Test connectivity", {"check": True}, 5), ("OK", (12, 1)))
         self.assertEqual(request.call_args.args, (GATEWAY,))
         self.assertEqual(request.call_args.kwargs["headers"], {"Authorization": "Bearer fixture-gateway-key"})
@@ -170,7 +170,7 @@ command = [{json.dumps(os.sys.executable)}, "server.py"]
 search_docs = ["development"]
 edit_docs = ["development"]
 ''')
-            with patch.dict(os.environ, {"OMNI_EXTENSIONS": str(config), "OMNI_PROVIDER": "demo"}):
+            with patch.dict(os.environ, {"PITCREW_EXTENSIONS": str(config), "PITCREW_PROVIDER": "demo"}):
                 extensions = Extensions(root, Redactor())
                 summary = extensions.describe(check=True)
                 self.assertEqual(summary["mcp"][0]["available_tools"], ["search_docs"])
@@ -193,6 +193,6 @@ edit_docs = ["development"]
                 finally:
                     lead.close()
             config.write_text(config.read_text().replace('"check.md"', '"../server.py"'))
-            with patch.dict(os.environ, {"OMNI_EXTENSIONS": str(config)}):
+            with patch.dict(os.environ, {"PITCREW_EXTENSIONS": str(config)}):
                 with self.assertRaisesRegex(ValueError, "relative Skill resource"):
                     Extensions(root, Redactor())

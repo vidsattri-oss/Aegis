@@ -9,6 +9,8 @@ import time
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
+from .agent_cli import AGENT_CLIS, complete_with_cli
+from .config import environment
 from .contracts import INJECT, MAX_BYTES, require
 
 DEFAULT_HOSTS = (
@@ -65,7 +67,7 @@ def request(url, *, payload=None, headers=None, timeout=30, limit=MAX_BYTES * 2,
     try:
         conn.connect()
         conn.request("GET" if body is None else "POST", target, body=body,
-                     headers={"Accept-Encoding": "identity", "User-Agent": "RittaiHarness/0.1",
+                     headers={"Accept-Encoding": "identity", "User-Agent": "PitCrewHarness/0.1",
                               **({"Content-Type": "application/json"} if body is not None else {}),
                               **(headers or {})})
         sock = conn.sock
@@ -92,13 +94,21 @@ def request(url, *, payload=None, headers=None, timeout=30, limit=MAX_BYTES * 2,
 def provider_settings(raw, *, require_model=True):
     require(isinstance(raw, dict), "Provider settings must be an object")
     kind = raw.get("kind")
-    require(kind in ("demo", "foundry", "azure-gateway", "compatible"), "Choose a supported provider")
+    require(kind in ("demo", "foundry", "azure-gateway", "compatible", "local", *AGENT_CLIS), "Choose a supported provider")
     settings = {"kind": kind}
-    if kind != "demo":
+    if kind in AGENT_CLIS:
+        model = raw.get("model") or ""
+        require(isinstance(model, str) and len(model.strip()) <= 160 and not any(ord(char) < 32 for char in model),
+                "Invalid model name")
+        settings["model"] = model.strip()
+    elif kind != "demo":
         url, model = raw.get("endpoint"), raw.get("model") or ""
         require(isinstance(url, str) and 0 < len(url) <= 500, "Provider endpoint is required")
         require(isinstance(model, str) and len(model.strip()) <= 160, "Invalid deployment or model name")
         parsed = urlsplit(url)
+        if kind == "local":
+            require(parsed.hostname in ("localhost", "127.0.0.1", "::1"),
+                    "A local model must use a loopback URL on the workspace host")
         require(parsed.hostname and not any((parsed.username, parsed.password, parsed.query, parsed.fragment))
                 and (parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in
                      ("localhost", "127.0.0.1", "::1"))), "Use a HTTPS base URL or loopback HTTP")
@@ -199,6 +209,7 @@ def foundry_deployments(settings, key):
 
 def list_provider_models(settings, key):
     require(settings["kind"] != "demo", "Choose a model provider before loading models")
+    require(settings["kind"] not in AGENT_CLIS, "Use the selected CLI's model picker to see available models")
     if settings["kind"] == "foundry":
         return {"kind": "foundry", "models": foundry_deployments(settings, key)}
     result, _ = request(settings["endpoint"] + "/models", timeout=20, headers=provider_headers(settings, key))
@@ -216,24 +227,27 @@ def list_provider_models(settings, key):
 
 
 def complete(settings, key, persona, data, timeout):
-    headers = provider_headers(settings, key)
-    response, _ = request(settings["endpoint"] + "/chat/completions", timeout=timeout, headers=headers,
-                          payload={"model": settings["model"], "messages": [
-                              {"role": "system", "content": persona},
-                              {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
-                          ]})
-    obj = json.loads(response)
-    choice = obj["choices"][0]
-    if choice.get("finish_reason") not in (None, "stop"):
-        raise RuntimeError(f"Provider stopped with {choice.get('finish_reason')}")
-    content = choice["message"]["content"]
+    if settings["kind"] in AGENT_CLIS:
+        content, tokens = complete_with_cli(settings, persona, data, timeout)
+    else:
+        headers = provider_headers(settings, key)
+        response, _ = request(settings["endpoint"] + "/chat/completions", timeout=timeout, headers=headers,
+                              payload={"model": settings["model"], "messages": [
+                                  {"role": "system", "content": persona},
+                                  {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
+                              ]})
+        obj = json.loads(response)
+        choice = obj["choices"][0]
+        if choice.get("finish_reason") not in (None, "stop"):
+            raise RuntimeError(f"Provider stopped with {choice.get('finish_reason')}")
+        content = choice["message"]["content"]
+        usage = obj.get("usage") or {}
+        tokens = tuple(item if type(item) is int and item >= 0 else 0
+                       for item in (usage.get("prompt_tokens"), usage.get("completion_tokens")))
     require(isinstance(content, str), "Provider returned no text")
     cleaned = content.strip()
     if cleaned.startswith("```") and cleaned.endswith("```"):
         cleaned = cleaned.split("\n", 1)[-1][:-3].strip()
-    usage = obj.get("usage") or {}
-    tokens = tuple(item if type(item) is int and item >= 0 else 0
-                   for item in (usage.get("prompt_tokens"), usage.get("completion_tokens")))
     return cleaned, tokens
 
 
@@ -340,18 +354,20 @@ def advisories(deps, timeout):
 
 
 def environment_provider():
-    return os.environ.get("OMNI_PROVIDER") or ("azure-gateway" if os.environ.get("AI_GATEWAY_CHAT_URL") else None)
+    return environment("PITCREW_PROVIDER") or ("azure-gateway" if os.environ.get("AI_GATEWAY_CHAT_URL") else None)
 
 
 def provider_key(kind):
+    if kind in AGENT_CLIS:
+        return ""
     if kind == "azure-gateway" and (key := os.environ.get("AI_GATEWAY_API_KEY")):
         return key
-    return os.environ.get("OMNI_API_KEY", "")
+    return environment("PITCREW_API_KEY", "")
 
 
 def initial_provider(*, require_model=True):
     kind = environment_provider() or "demo"
-    endpoint, model = os.environ.get("OMNI_ENDPOINT"), os.environ.get("OMNI_MODEL")
+    endpoint, model = environment("PITCREW_ENDPOINT"), environment("PITCREW_MODEL")
     if kind == "azure-gateway":
         endpoint = endpoint or os.environ.get("AI_GATEWAY_CHAT_URL")
         model = model or os.environ.get("AI_GATEWAY_MODEL")

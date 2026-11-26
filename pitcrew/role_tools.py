@@ -19,6 +19,7 @@ ROLE_TOOLS = {
     "qa": ("test_matrix", "Compare the draft test plan with the approved acceptance criteria."),
     "deploy": ("release_manifest", "Hash the approved release files and identify the runtime entry point."),
     "review": ("evidence_check", "Check that the Lead supplied a passing contract and required execution evidence."),
+    "specialist": ("specialist_report", "Check the delegated specialist report format."),
 }
 
 
@@ -112,6 +113,9 @@ def invoke(role, tool, arguments):
                              for journey in draft["journeys"]]}
     if role == "deploy":
         return file_manifest(arguments.get("files"))
+    if role == "specialist":
+        validate(role, draft)
+        return {"findings": len(draft["findings"]), "recommendations": len(draft["recommendations"])}
 
     evidence = arguments.get("evidence", {})
     stage = arguments.get("stage")

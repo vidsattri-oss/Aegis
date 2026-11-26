@@ -12,11 +12,12 @@ from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
 
-from omni import demo
-from omni.contracts import STAGES, manifest, validate
-from omni.engine import Lead, TERMINAL
-from omni.integrations import fetch_source, packages, provider_settings
-from omni.sandbox import ContainerCapacity, Docker, execution_plan, execution_policy, profile
+from pitcrew import demo
+from pitcrew.contracts import PERSONAS, STAGES, manifest, validate
+from pitcrew.engine import Lead, TERMINAL
+from pitcrew.integrations import fetch_source, packages, provider_settings
+from pitcrew.repository import Repository, github_url
+from pitcrew.sandbox import ContainerCapacity, Docker, execution_plan, execution_policy, profile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -137,6 +138,91 @@ class WorkspaceTest(unittest.TestCase):
         self.assertIsNone(lead.get(sid)["preview"])
         self.assertTrue(lead.change_preview(sid, True))
 
+    def test_github_laps_commit_to_source_history_and_learn_from_verified_work(self):
+        root = Path(self.temporary.name)
+        upstream = root / "upstream"
+        source = root / "source"
+        source.mkdir()
+        git = Repository.git
+        git(root, "init", "--bare", "--initial-branch=main", str(upstream))
+        git(source, "init", "--initial-branch=main")
+        Repository.write_files(source, {**demo.FILES, "README.md": "Keep this file.\n", "obsolete.txt": "Remove this."})
+        (source / "asset.bin").write_bytes(b"\x00\xff")
+        git(source, "add", "-A")
+        git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org", "commit", "-m", "Base project")
+        base = git(source, "rev-parse", "HEAD").stdout.strip()
+        git(source, "push", str(upstream), "HEAD:refs/heads/main")
+        url = "https://github.com/example/fieldwork.git"
+        observed = {}
+        specialist = {"name": "Acceptance specialist", "persona": "Focus on observable user flows.",
+                      "assignment": "Read the repo and suggest acceptance checks."}
+
+        def model(settings, key, persona, data, timeout):
+            role = next(role for role, instruction in PERSONAS.items() if persona.startswith(instruction))
+            self.assertEqual(data["repository"]["url"], url)
+            observed[role] = data["agent_playbook"]["revision"]
+            if role == "research" and "round" in data:
+                value = {"urls": [demo.SOURCE] if data["round"] == 1 else [], "done": True}
+            elif role == "review":
+                value = {"passed": True, "checks": ["Verified acceptance evidence"], "feedback": "Approved."}
+            elif role == "specialist":
+                self.assertEqual(data["specialist"], specialist)
+                value = {"summary": "Use the existing UI.", "findings": ["The project includes a README."],
+                         "recommendations": ["Test the changed title."]}
+            else:
+                value = copy.deepcopy(demo.EXAMPLES[role])
+                if role == "lead":
+                    value["specialists"] = [specialist]
+                if role == "development":
+                    prior = data["previous_source"]
+                    self.assertEqual(prior["README.md"], "Keep this file.\n")
+                    self.assertNotIn("asset.bin", prior)
+                    value["files"] = {"index.html": prior["index.html"] + "\n<!-- approved edit -->\n"}
+                    value["remove"] = ["obsolete.txt"] if "obsolete.txt" in prior else []
+            return json.dumps(value), (0, 0)
+
+        def local_transport(cwd, *args, **options):
+            return git(cwd, *(str(upstream) if arg == url else arg for arg in args), **options)
+
+        docker = DockerFixture()
+        lead = self.lead(docker, model=model, scan=lambda *_: [],
+                         fetch=lambda *args: {"url": args[0], "excerpt": "Verified source fixture."})
+        lead.configure({"kind": "compatible", "endpoint": "http://127.0.0.1:8181/v1", "model": "fixture"})
+        with patch.object(lead.repo, "git", side_effect=local_transport):
+            race = lead.create_project("GitHub fixture", repository=url.removesuffix(".git"), branch="main")
+            lead.store.remember(race["id"], [("decision", "Project scope", "Use a secluded build fixture.")])
+            self.assertEqual(lead.store.retrieve("secluded"), [])
+            self.assertEqual(len(lead.store.retrieve("secluded", project=race["id"])), 1)
+            sid = lead.launch(race["id"], "Update the existing Fieldwork page.")
+            first = self.completed(lead, sid)
+            self.assertEqual(first["state"], "completed", first["error"])
+            self.assertEqual(first["github_base"], base)
+            self.assertEqual(set(observed), set(PERSONAS))
+            self.assertIn("specialist", [role for _, role in docker.names])
+            commit = first["github_commit"]
+            self.assertEqual(git(lead.repo.root, "rev-parse", commit + "^").stdout.strip(), base)
+            self.assertEqual(git(lead.repo.root, "show", commit + ":README.md").stdout, "Keep this file.\n")
+            self.assertEqual(git(lead.repo.root, "show", commit + ":asset.bin", binary=True).stdout, b"\x00\xff")
+            self.assertNotIn("obsolete.txt", git(lead.repo.root, "ls-tree", "-r", "--name-only", commit).stdout)
+            self.assertFalse(git(upstream, "branch", "--list", "pitcrew/*").stdout.strip())
+            published = lead.publish(sid)
+            self.assertEqual(git(upstream, "rev-parse", published["branch"]).stdout.strip(), commit)
+            self.assertEqual(git(upstream, "rev-parse", "main").stdout.strip(), base)
+            self.assertEqual(lead.publish(sid), published)
+            self.assertEqual(lead.dream()["playbooks_revised"], len(PERSONAS))
+            self.assertEqual(lead.dream()["playbooks_revised"], 0)
+            self.assertEqual(lead.store.playbook(lead.create_project("Isolated")["id"], "development")["revision"], 0)
+            second = self.completed(lead, lead.launch(race["id"], "Make another edit to the existing page."))
+            self.assertEqual(second["state"], "completed", second["error"])
+            self.assertEqual(second["github_base"], commit)
+            self.assertTrue(all(revision == 1 for revision in observed.values()), observed)
+
+    def test_github_repository_urls_cannot_supply_credentials_or_another_host(self):
+        for value in ("file:///tmp/repo", "https://github.com.evil.test/user/repo",
+                      "https://token@github.com/user/repo", "https://github.com/user/repo?token=secret"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                github_url(value)
+
     def test_exhausted_qa_gate_prevents_release_and_can_resume(self):
         docker = DockerFixture(failures=3)
         lead = self.lead(docker)
@@ -223,7 +309,7 @@ class WorkspaceTest(unittest.TestCase):
         project = lead.store.project("CLI fixture", "")
         sid = lead.launch(project["id"], "", sample=True)
         self.assertEqual(self.completed(lead, sid)["state"], "completed")
-        common = [sys.executable, "-m", "omni", "--data", self.temporary.name, "--json"]
+        common = [sys.executable, "-m", "pitcrew", "--data", self.temporary.name, "--json"]
         for arguments, check in [
             (["status", sid], lambda values: self.assertEqual(values["state"], "completed")),
             (["sessions", "--project", project["id"]], lambda values: self.assertEqual(values[0]["id"], sid)),

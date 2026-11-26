@@ -55,7 +55,7 @@ def discover(resource):
     location = https_url(resource)
     origin = f"https://{location.netloc}"
     challenge = exchange(resource, data={"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {
-        "protocolVersion": VERSION, "capabilities": {}, "clientInfo": {"name": "RittaiHarness", "version": "0.1.0"}}},
+        "protocolVersion": VERSION, "capabilities": {}, "clientInfo": {"name": "Pit Crew Harness", "version": "0.1.0"}}},
         allowed=(200, 202, 204, 401))
     advertised = re.search(r'\bresource_metadata="([^"\r\n]+)"', challenge or "")
     if advertised:
@@ -113,7 +113,7 @@ class MCPOAuth:
         if not client_id:
             registration = metadata.get("registration_endpoint")
             require(registration, "Set oauth.client_id to a registered public client ID for this server")
-            registered = exchange(registration, data={"client_name": "RittaiHarness", "application_type": "native",
+            registered = exchange(registration, data={"client_name": "Pit Crew Harness", "application_type": "native",
                 "redirect_uris": [redirect], "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"], "token_endpoint_auth_method": "none"}, allowed=(200, 201))
             client_id = registered.get("client_id")

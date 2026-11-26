@@ -1,8 +1,9 @@
 """Diagnostics for the workspace, local Docker mounts, and provider access."""
 import http.client
-import os
 
-CACHES = {"PyPI": ("OMNI_WHEELHOUSE", "/wheels"), "npm": ("OMNI_NPM_CACHE", "/npm-input")}
+from .config import environment
+
+CACHES = {"PyPI": ("PITCREW_WHEELHOUSE", "/wheels"), "npm": ("PITCREW_NPM_CACHE", "/npm-input")}
 
 
 def check_workspace(docker, store, provider_check=None):
@@ -26,7 +27,7 @@ def check_workspace(docker, store, provider_check=None):
         mount_status = "skipped"
         results.append({"name": "Workspace bind mount", "status": mount_status, "detail": "Docker and the role images must be ready."})
     for ecosystem, (variable, _) in CACHES.items():
-        if os.environ.get(variable):
+        if environment(variable):
             detail = ("Readable inside the worker. Package availability is checked during the offline build."
                       if mount_status == "passed" else "Configured. Check the workspace bind mount result.")
         else:

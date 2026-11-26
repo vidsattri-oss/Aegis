@@ -16,11 +16,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .config import environment
 from .contracts import PROFILES, require
 from .preflight import CACHES
 from .role_tools import FRAME_LIMIT, ROLE_TOOLS
 
-IMAGE_PREFIX = "rittaiharness"
+IMAGE_PREFIX = "pitcrew"
 TASK_PROFILES = {**PROFILES, "build": ("runtime", 1, 512, 128),
                  "qa_browser": ("qa", 2, 1536, 256), "qa_artifact": ("runtime", 1, 512, 128),
                  "release": ("runtime", 1, 512, 128), "preview": ("runtime", 1, 512, 128),
@@ -280,8 +281,8 @@ class Docker:
         return {"containers": count, "cpu": round(cpu, 3), "ram": math.ceil(ram)}
 
     def probe_mounts(self, directory):
-        name = "rittaiharness-probe-" + secrets.token_hex(8)
-        targets = [target for variable, target in CACHES.values() if os.environ.get(variable)]
+        name = "pitcrew-probe-" + secrets.token_hex(8)
+        targets = [target for variable, target in CACHES.values() if environment(variable)]
         source = "from pathlib import Path\nimport sys\nassert Path('/input/probe').read_text() == sys.argv[1]\n"
         source += "for path in sys.argv[2:]:\n    next(Path(path).iterdir(), None)\n"
         with tempfile.TemporaryDirectory(prefix=".docker-probe-", dir=directory) as scratch:
@@ -314,7 +315,7 @@ class Docker:
         if source is not None:
             mounts = [(source, "/input"), (checks, "/checks")]
             if caches:
-                mounts += [(os.environ.get(variable), destination) for variable, destination in CACHES.values()]
+                mounts += [(environment(variable), destination) for variable, destination in CACHES.values()]
             for directory, destination in mounts:
                 if directory:
                     absolute = str(Path(directory).resolve(strict=True))

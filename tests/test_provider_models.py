@@ -8,13 +8,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import test_workspace
-from omni import demo
-from omni.cli import main
-from omni.contracts import PERSONAS
-from omni.credentials import ProviderCredentials
-from omni.engine import Lead, discover_models
-from omni.integrations import complete, list_provider_models, provider_settings
-from omni.store import Store
+from pitcrew import demo
+from pitcrew.cli import main
+from pitcrew.contracts import PERSONAS
+from pitcrew.credentials import ProviderCredentials
+from pitcrew.engine import Lead, discover_models
+from pitcrew.integrations import complete, list_provider_models, provider_settings
+from pitcrew.store import Store
 
 FOUNDRY_RESOURCE = "https://fixture.services.ai.azure.com"
 FOUNDRY_PROJECT = FOUNDRY_RESOURCE + "/api/projects/trial"
@@ -53,7 +53,7 @@ class ProviderModelsTest(unittest.TestCase):
             ):
                 with self.subTest(header=next(iter(headers))):
                     pages = [(json.dumps(page).encode(), "application/json") for page in (first, second)]
-                    with patch("omni.integrations.request", side_effect=pages) as request:
+                    with patch("pitcrew.integrations.request", side_effect=pages) as request:
                         result = discover_models(settings, credentials, key)
                     self.assertEqual([call.args[0] for call in request.call_args_list], [DEPLOYMENTS, next_page])
                     self.assertTrue(all(call.kwargs["headers"] == headers for call in request.call_args_list))
@@ -63,7 +63,7 @@ class ProviderModelsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Deployment or model is required"):
                 provider_settings({"kind": "foundry", "endpoint": FOUNDRY_RESOURCE})
             response_chat = b'{"choices":[{"message":{"content":"OK"}}]}'
-            with patch("omni.integrations.request", return_value=(response_chat, "application/json")) as request:
+            with patch("pitcrew.integrations.request", return_value=(response_chat, "application/json")) as request:
                 complete({**settings, "model": result["models"][0]["id"]}, "fixture-provider-secret", "Test", {}, 5)
             self.assertEqual(request.call_args.kwargs["payload"]["model"], "team-chat")
 
@@ -71,7 +71,7 @@ class ProviderModelsTest(unittest.TestCase):
         resource = provider_settings({"kind": "foundry", "endpoint": FOUNDRY_RESOURCE}, require_model=False)
         project = provider_settings({"kind": "foundry", "endpoint": FOUNDRY_PROJECT}, require_model=False)
         response = {"value": [], "nextLink": "https://elsewhere.invalid/deployments?api-version=v1"}
-        with patch("omni.integrations.request", return_value=(json.dumps(response).encode(), "application/json")) as request:
+        with patch("pitcrew.integrations.request", return_value=(json.dumps(response).encode(), "application/json")) as request:
             with self.assertRaisesRegex(ValueError, "Paste the Foundry project endpoint"):
                 list_provider_models(resource, "fixture-provider-secret")
             request.assert_not_called()
@@ -81,11 +81,11 @@ class ProviderModelsTest(unittest.TestCase):
             self.assertEqual(request.call_args.args[0], DEPLOYMENTS)
 
     def test_cli_models_prints_foundry_deployment_names(self):
-        config = {"OMNI_PROVIDER": "foundry", "OMNI_ENDPOINT": FOUNDRY_PROJECT, "OMNI_API_KEY": "fixture-key"}
+        config = {"PITCREW_PROVIDER": "foundry", "PITCREW_ENDPOINT": FOUNDRY_PROJECT, "PITCREW_API_KEY": "fixture-key"}
         response = b'{"value":[{"type":"ModelDeployment","name":"team-chat","modelName":"foundation-model"}]}'
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, config, clear=True), redirect_stdout(stdout):
-            with patch("omni.integrations.request", return_value=(response, "application/json")) as request:
+            with patch("pitcrew.integrations.request", return_value=(response, "application/json")) as request:
                 with self.assertRaises(SystemExit) as exit_status:
                     main(["--data", directory, "models"])
             self.assertEqual(exit_status.exception.code, 0)
@@ -116,7 +116,7 @@ class ProviderModelsTest(unittest.TestCase):
             directory, docker=test_workspace.DockerFixture(), model=model, scan=lambda *_: [],
             fetch=lambda *args: {"url": args[0], "excerpt": "Verified source fixture."}, keyring=KeyringFixture()
         )) as lead:
-            with patch("omni.integrations.request", return_value=(json.dumps(models).encode(), "application/json")):
+            with patch("pitcrew.integrations.request", return_value=(json.dumps(models).encode(), "application/json")):
                 settings = lead.configure({"kind": "foundry", "endpoint": FOUNDRY_PROJECT, "api_key": "workspace-foundry-key",
                                            "role_models": {"development": "chat-b", "review": "chat-a"}})
                 with self.assertRaisesRegex(ValueError, "missing from the project's chat deployments"):

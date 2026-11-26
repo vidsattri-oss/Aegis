@@ -1,26 +1,29 @@
 "use strict";
 
-const stations = [["lead", "Lead plan"], ...stages];
-const roles = ["lead", ...stages.map(([role]) => role), "review"];
+const stations = [["lead", "Run plan"], ...stages];
+const roles = (session) => ["lead", ...stages.map(([role]) => role), "review",
+  ...(session.agents.some((agent) => agent.role === "specialist") ? ["specialist"] : [])];
 const stageNames = Object.fromEntries(stations);
-const touchLabel = (count) => count + (count === 1 ? " touch" : " touches");
+const attemptLabel = (count) => count + (count === 1 ? " attempt" : " attempts");
 const portrait = (role) => node("span", { class: "portrait", "data-role": role, "aria-hidden": "true" });
+const agentName = (agent) => agent.profile.persona_name || names[agent.role];
 const scopeKey = ({ role, stage, attempt }) => [role || "", stage || "", attempt || ""].join("/");
 const eventNames = {
   container: "Container", tool_call: "Tool call", tool_result: "Tool result", execution_log: "Execution log",
   exception: "Exception", gate_passed: "Gate passed", gate_failed: "Gate failed", review_committed: "Review committed",
   capacity_wait: "Waiting for Docker capacity", execution_plan: "Docker task sizes",
   released: "Released", preview_stopped: "Preview stopped", cancelled: "Cancelled", interrupted: "Interrupted",
+  delegated: "Specialist assigned", github_base: "GitHub base", github_published: "GitHub branch published",
 };
 const toolNames = {
   "model.chat": "Model", "docker.execute": "Docker", "research.fetch": "Research fetch",
-  "osv.querybatch": "Dependency scan", "preview.start": "Preview", "lead.chat": "Lead chat",
+  "osv.querybatch": "Dependency scan", "preview.start": "Preview", "lead.chat": "Team Radio",
 };
 
 function scopeTitle({ role, stage, attempt }) {
   const agent = state.session.agents.find((item) => item.id === attempt);
-  return agent ? names[agent.role] + " · attempt " + agent.number + " · " + stageNames[agent.stage]
-    : [names[role], stageNames[stage]].filter(Boolean).join(" · ") || "All session logs";
+  return agent ? agentName(agent) + " · attempt " + agent.number + " · " + stageNames[agent.stage]
+    : [names[role], stageNames[stage]].filter(Boolean).join(" · ") || "All lap telemetry";
 }
 
 function matchingAgents(session, scope) {
@@ -82,20 +85,22 @@ function orgChart(session) {
     const running = attempts.filter((agent) => agent.status === "Running").length;
     const retries = attempts.filter((agent) => agent.status === "Retried" || agent.status === "Failed").length;
     const status = running ? "Running" : attempts.at(-1)?.status;
-    const title = role === "lead" ? "Lead Agent" : names[role];
-    return scopeButton(title + ", " + touchLabel(attempts.length), { role }, {
-      class: "org-card", "data-role": role, "data-status": status || "Pending",
+    const title = names[role];
+    const term = { lead: "race-engineer", review: "scrutineers" }[role];
+    return scopeButton(title + ", " + attemptLabel(attempts.length), { role }, {
+      ...(term && termHint(term)), class: "org-card", "data-role": role, "data-status": status || "Pending",
     }, portrait(role), node("span", { class: "org-card-text" }, node("strong", {}, title),
-      muted(touchLabel(attempts.length) + (retries > 0 ? " · " + retries + " failed" : ""))),
+      muted(attemptLabel(attempts.length) + (retries > 0 ? " · " + retries + " failed" : ""))),
     node("span", { class: "org-indicator", "aria-hidden": "true", title: status || "Pending" }));
   };
   return node("section", { class: "map-section org-section", "aria-labelledby": "team-heading" },
-    node("div", { class: "map-heading" }, node("h2", { id: "team-heading", tabindex: "-1" }, "Team hierarchy"),
+    node("div", { class: "map-heading" }, node("div", { class: "term-label" },
+      node("h2", { id: "team-heading", tabindex: "-1" }, "Pit Crew"), termHelp("crew")),
       muted(number.format(session.agents.filter((agent) => agent.status === "Running").length) + " running")),
     node("div", { class: "org-chart" },
       node("div", { class: "org-root" }, card("lead")),
-      node("ul", { class: "org-children", role: "list", "aria-label": "Agents reporting to the Lead" },
-        roles.slice(1).map((role) => node("li", {}, card(role))))));
+      node("ul", { class: "org-children", role: "list", "aria-label": "Crew reporting to the race engineer" },
+        roles(session).slice(1).map((role) => node("li", {}, card(role))))));
 }
 
 function factoryMap(session) {
@@ -109,13 +114,13 @@ function factoryMap(session) {
     const status = gates.get(stage)?.state || "pending";
     const touches = matchingAgents(session, { stage }).length;
     return node("th", { scope: "col", class: "rail-stop", "data-state": status },
-      scopeButton(title + ", " + (labels[status] || status) + ", " + touchLabel(touches), { stage },
-        { class: "rail-station" },
+      scopeButton(title + ", " + (labels[status] || status) + ", " + attemptLabel(touches), { stage },
+        { class: "rail-station", ...(stage === "deploy" && termHint("track-release")) },
         node("span", { class: "rail-marker", "aria-hidden": "true" }),
         node("strong", {}, title), node("span", { class: "rail-state" }, labels[status] || status),
-        node("small", { class: "rail-total" }, touchLabel(touches))));
+        node("small", { class: "rail-total" }, attemptLabel(touches))));
   });
-  const lines = roles.map((role) => {
+  const lines = roles(session).map((role) => {
     const touches = stations.map(([stage]) => counts.get(scopeKey({ role, stage })) || 0);
     const first = touches.findIndex(Boolean);
     const last = touches.findLastIndex(Boolean);
@@ -126,36 +131,38 @@ function factoryMap(session) {
         const count = touches[index];
         return node("td", { class: "rail-cell" + (first >= 0 && first < index && index <= last ? " has-left" : "")
           + (first >= 0 && first <= index && index < last ? " has-right" : "") + (index < first || index > last ? " off-route" : "") },
-        count > 0 ? scopeButton(names[role] + " · " + title + " · " + touchLabel(count), { role, stage },
-          { class: "rail-count", title: touchLabel(count) }, count)
-          : node("span", { class: "rail-empty", "aria-label": "0 touches" }, "–"));
+        count > 0 ? scopeButton(names[role] + " · " + title + " · " + attemptLabel(count), { role, stage },
+          { class: "rail-count", title: attemptLabel(count) }, count)
+          : node("span", { class: "rail-empty", "aria-label": "0 attempts" }, "–"));
       }));
   });
   return node("section", { class: "map-section factory-section", "aria-labelledby": "factory-heading" },
-    node("div", { class: "map-heading" }, node("h2", { id: "factory-heading" }, "Factory line"),
-      muted("Touches count attempts, including retries")),
-    node("div", { class: "rail-scroll", tabindex: "0", "aria-label": "Scrollable factory line" },
-      node("table", { class: "rail-map", "aria-label": "Agent touches by stage" },
-        node("thead", {}, node("tr", {}, node("th", { scope: "col", class: "rail-role-head rail-corner" }, "Agent line"), stops)),
+    node("div", { class: "map-heading" }, node("div", { class: "term-label" },
+      node("h2", { id: "factory-heading" }, "Pit Lane"), termHelp("pit-lane")),
+      muted("Attempts include retries")),
+    node("div", { class: "rail-scroll", tabindex: "0", "aria-label": "Scrollable pit lane" },
+      node("table", { class: "rail-map", "aria-label": "Crew attempts by stage" },
+        node("thead", {}, node("tr", {}, node("th", { scope: "col", class: "rail-role-head rail-corner" }, "Crew"), stops)),
         node("tbody", {}, lines))));
 }
 
 function logInspector() {
   return node("aside", { id: "log-inspector", class: "log-inspector", "aria-labelledby": "log-heading" },
-    node("div", { class: "map-heading" }, node("h2", { id: "log-heading", tabindex: "-1" }, "Execution logs"),
-      actions(button("Map ↑", jumpToMap, "quiet log-back"),
+    node("div", { class: "map-heading" }, node("div", { class: "term-label" },
+      node("h2", { id: "log-heading", tabindex: "-1" }, "Telemetry"), termHelp("telemetry")),
+      actions(button("Pit Lane ↑", jumpToMap, "quiet log-back"),
         button("Reset filter", () => selectScope({}), "quiet log-reset"))),
     node("div", { id: "log-scope", class: "log-scope", role: "status" }),
     node("div", { id: "log-context" }),
-    node("div", { id: "log-feed", class: "log-feed", tabindex: "0", role: "region", "aria-label": "Filtered log events" }));
+    node("div", { id: "log-feed", class: "log-feed", tabindex: "0", role: "region", "aria-label": "Filtered telemetry" }));
 }
 
 function mapPanel(session) {
   return node("div", { class: "operations" },
     node("div", { class: "map-stack" },
       node("div", { class: "map-tools" }, node("span", { class: "session-signal", "data-state": session.state },
-        node("i", { "aria-hidden": "true" }), ["queued", "running"].includes(session.state) ? "Updating live" : "Session activity"),
-        button("View logs ↓", jumpToLogs, "quiet log-jump")),
+        node("i", { "aria-hidden": "true" }), ["queued", "running"].includes(session.state) ? "Updating live" : "Lap activity"),
+        button("View telemetry ↓", jumpToLogs, "quiet log-jump")),
       orgChart(session), factoryMap(session)), logInspector());
 }
 
@@ -170,9 +177,9 @@ function logContext(session, telemetry) {
   const agent = attempt ? agents.find((item) => item.id === attempt) : null;
   const details = telemetry?.agent;
   const attempts = (!attempt && (role || stage) ? agents : []).map((item) => scopeButton(
-    names[item.role] + " · " + stageNames[item.stage] + " · attempt " + item.number,
+    agentName(item) + " · " + stageNames[item.stage] + " · attempt " + item.number,
     { role: item.role, stage: item.stage, attempt: item.id }, { class: "attempt-card", "data-role": item.role },
-    portrait(item.role), node("span", { class: "org-card-text" }, node("strong", {}, names[item.role]),
+    portrait(item.role), node("span", { class: "org-card-text" }, node("strong", {}, agentName(item)),
       muted(stageNames[item.stage] + " · attempt " + item.number)), badge(item.status)));
   return [
     gate && disclosure("Stage handoff and QA", node("div", { class: "disclosure-body" },
@@ -181,7 +188,7 @@ function logContext(session, telemetry) {
       gate.artifact && node("pre", {}, val(gate.artifact)),
       gate.details && node("pre", {}, val(gate.details)))),
     agent && node("div", { class: "agent-context" }, portrait(agent.role), node("div", {},
-      node("strong", {}, names[agent.role]), muted(badge(agent.status), " ", agent.profile.cpu + " CPU / " + agent.profile.ram + " MiB"))),
+      node("strong", {}, agentName(agent)), muted(badge(agent.status), " ", agent.profile.cpu + " CPU / " + agent.profile.ram + " MiB"))),
     details && disclosure("Persona, input and resource details", node("div", { class: "disclosure-body" },
       facts([["Agent ID", code(details.id)], ["Spawned", timestamp(details.started)], ["Terminated", timestamp(details.ended)],
         ["Provider tokens", number.format(details.input_tokens + details.output_tokens)], ["Image", details.profile.image],
@@ -192,7 +199,7 @@ function logContext(session, telemetry) {
       node("h3", {}, "System persona"), node("pre", {}, details.persona),
       node("h3", {}, "Input prompt"), node("pre", {}, val(details.input)),
       details.trace && [node("h3", {}, "Exception trace"), node("pre", {}, val(details.trace))])),
-    attempts.length > 0 && disclosure(touchLabel(attempts.length),
+    attempts.length > 0 && disclosure(attemptLabel(attempts.length),
       node("div", { class: "attempt-list" }, attempts)),
   ].filter(Boolean);
 }
@@ -254,10 +261,10 @@ function renderLogFeed(telemetry) {
   const position = sameScope ? feed.scrollTop : 0;
   feed.dataset.scope = filter;
   if (!telemetry || telemetry.loading && !telemetry.events.length) {
-    feed.replaceChildren(node("p", { class: "muted log-empty" }, "Loading logs…"));
+    feed.replaceChildren(node("p", { class: "muted log-empty" }, "Loading telemetry…"));
   } else if (telemetry.error) {
     feed.replaceChildren(node("p", { class: "error-text log-empty" }, telemetry.error),
-      button("Retry loading logs", () => loadTelemetry(), "quiet"));
+      button("Retry loading telemetry", () => loadTelemetry(), "quiet"));
   } else if (!telemetry.events.length) {
     feed.replaceChildren(node("p", { class: "muted log-empty" }, "No events for this selection yet."));
   } else {
@@ -307,6 +314,7 @@ async function loadTelemetry(older = false) {
 
 function sessionPage(session) {
   const panels = { map: mapPanel, summary: summaryPanel, output: outputPanel };
+  const tabTerms = { map: "pit-lane", summary: "debrief", output: "parc-ferme" };
   const changeTab = (id, focus = false) => {
     state.tab = id;
     for (const tab of $("#session-tabs").querySelectorAll("[role=tab]")) {
@@ -322,14 +330,15 @@ function sessionPage(session) {
     panel.replaceChildren(...[panels[id](state.session)].flat(Infinity).filter(Boolean));
     if (id === "map") { renderLogPanel(); loadTelemetry(); }
   };
-  const tabs = node("div", { class: "tabs", role: "tablist", id: "session-tabs", "aria-label": "Session views",
+  const tabs = node("div", { class: "tabs", role: "tablist", id: "session-tabs", "aria-label": "Lap views",
     onkeydown: (event) => {
       const current = tabNames.findIndex(([id]) => id === state.tab);
       const last = tabNames.length - 1;
       const target = { ArrowLeft: current === 0 ? last : current - 1,
         ArrowRight: current === last ? 0 : current + 1, Home: 0, End: last }[event.key];
       if (target !== undefined) { event.preventDefault(); changeTab(tabNames[target][0], true); }
-    } }, tabNames.map(([id, title]) => node("button", { type: "button", class: "tab" + (state.tab === id ? " active" : ""),
+    } }, tabNames.map(([id, title]) => node("button", { ...termHint(tabTerms[id]),
+      type: "button", class: "tab" + (state.tab === id ? " active" : ""),
       id: "tab-" + id, role: "tab", "aria-controls": "session-panel", "aria-selected": String(state.tab === id),
       tabindex: state.tab === id ? 0 : -1, onclick: () => changeTab(id) }, title)));
   const control = (path) => (event) => perform(async () => {
@@ -337,11 +346,11 @@ function sessionPage(session) {
     await refresh(true);
   }, event);
   const active = ["queued", "running"].includes(session.state);
-  return [heading(limit(session.plan?.summary || session.prompt, 95), "Session " + session.id.slice(0, 8),
+  return [heading(limit(session.plan?.summary || session.prompt, 95), "Lap " + session.id.slice(0, 8),
     actions(badge(session.state), active ? button("Cancel", control("cancel"), "quiet danger")
       : ["failed", "cancelled"].includes(session.state) && button("Retry", control("retry"), "quiet"),
-      !active && button("New session", () => startSession(session.project_id), "quiet")), "session-heading"),
-    node("section", { class: "inspection", "aria-label": "Session views" }, tabs,
+      !active && button("New lap", () => startSession(session.project_id), "quiet")), "session-heading"),
+    node("section", { class: "inspection", "aria-label": "Lap views" }, tabs,
       node("div", { id: "session-panel", class: "tab-content" + (state.tab === "map" ? " map-panel" : ""),
         role: "tabpanel", "aria-labelledby": "tab-" + state.tab }, panels[state.tab](session)))];
 }
@@ -353,11 +362,11 @@ function syncLeadChat(session) {
     root.dataset.session = session.id;
     root.dataset.lastRead = session.messages.at(-1)?.id || 0;
     delete root.dataset.lastRendered;
-    const launcher = node("button", { type: "button", class: "chat-launcher", "aria-expanded": "false",
-      "aria-controls": "lead-drawer" }, portrait("lead"), "Lead chat", node("span", { class: "chat-unread", hidden: true }));
-    const messages = node("div", { class: "messages", role: "log", "aria-label": "Lead conversation" });
-    const input = node("input", { name: "message", "aria-label": "Message the Lead Agent",
-      placeholder: "Ask the Lead Agent…", required: true, maxlength: 4000 });
+    const launcher = node("button", { ...termHint("team-radio"), type: "button", class: "chat-launcher", "aria-expanded": "false",
+      "aria-controls": "lead-drawer" }, portrait("lead"), "Team Radio", node("span", { class: "chat-unread", hidden: true }));
+    const messages = node("div", { class: "messages", role: "log", "aria-label": "Team radio conversation" });
+    const input = node("input", { name: "message", "aria-label": "Message the race engineer",
+      placeholder: "Ask the race engineer…", required: true, maxlength: 4000 });
     const send = node("button", { type: "submit", class: "button primary" }, "Send");
     const draft = node("form", { class: "chat-draft", onsubmit: async (event) => {
       event.preventDefault();
@@ -372,8 +381,8 @@ function syncLeadChat(session) {
       finally { send.disabled = false; }
     } }, input, send);
     const drawer = node("section", { id: "lead-drawer", class: "lead-drawer", "aria-labelledby": "lead-title", hidden: true },
-      node("header", { class: "chat-header" }, portrait("lead"), node("h2", { id: "lead-title" }, "Lead Agent"),
-        node("button", { type: "button", class: "close", "aria-label": "Minimize Lead chat",
+      node("header", { class: "chat-header" }, portrait("lead"), node("h2", { id: "lead-title" }, "Team Radio"),
+        node("button", { type: "button", class: "close", "aria-label": "Minimize team radio",
           onclick: () => toggle(false) }, "×")), messages, draft);
     const toggle = (open) => {
       drawer.hidden = !open;
@@ -399,7 +408,7 @@ function syncLeadChat(session) {
   const position = messages.scrollTop;
   const appended = session.messages.filter((message) => message.id > Number(root.dataset.lastRendered || 0));
   messages.append(...appended.map((message) => node("div", { class: "message " + message.speaker },
-    muted((message.speaker === "lead" ? "Lead" : "You") + " · " + timestamp(message.created)), node("p", {}, message.text))));
+    muted((message.speaker === "lead" ? "Race Engineer" : "You") + " · " + timestamp(message.created)), node("p", {}, message.text))));
   messages.scrollTop = follow ? messages.scrollHeight : position;
   root.dataset.lastRendered = last;
   if (isOpen) root.dataset.lastRead = last;
@@ -424,6 +433,9 @@ function renderWorkspace() {
     loadTelemetry();
   }
   if (active?.id?.startsWith("tab-") || active?.id === "log-heading") document.getElementById(active.id)?.focus({ preventScroll: true });
+  if (active?.classList.contains("term-help") && !active.isConnected) {
+    main.querySelector('.term-help[data-f1-term="' + active.dataset.f1Term + '"]')?.focus({ preventScroll: true });
+  }
   if (active?.dataset.filter !== undefined) {
     const candidates = [...main.querySelectorAll('[data-filter="' + active.dataset.filter + '"]')];
     candidates.find((item) => item.className === active.className)?.focus({ preventScroll: true });

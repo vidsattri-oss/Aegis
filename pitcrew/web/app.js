@@ -1,14 +1,34 @@
 "use strict";
 
 const $ = (selector) => document.querySelector(selector);
-const stages = [["research", "Research"], ["architecture", "Architecture"], ["design", "UX/UI design"],
-  ["development", "Development"], ["qa", "QA / UAT"], ["deploy", "Deploy"]];
-const names = Object.fromEntries([["lead", "Lead"], ["review", "Independent QA"], ...stages]);
+const stages = [["research", "Strategy"], ["architecture", "Technical Design"], ["design", "Experience Design"],
+  ["development", "Build"], ["qa", "Systems Test"], ["deploy", "Track Release"]];
+const names = { ...Object.fromEntries(stages), lead: "Race Engineer", development: "Build Crew",
+  qa: "Test Engineer", deploy: "Trackside Ops", review: "Scrutineers", specialist: "Specialists" };
 const labels = { queued: "Queued", running: "Running", retrying: "Retried", completed: "Healthy",
   failed: "Failed", cancelled: "Cancelled", passed: "Passed", ready: "Ready", pending: "Pending" };
 const state = { workspace: null, project: null, session: null, route: "", tab: "map",
   engine: null, csrf: "", refreshing: false, toast: null, scope: {}, telemetry: null, signature: "" };
-const tabNames = [["map", "Team & Factory Line"], ["summary", "Summary"], ["output", "Live output"]];
+const tabNames = [["map", "Crew & Pit Lane"], ["summary", "Lap Debrief"], ["output", "Parc Fermé"]];
+const f1Terms = {
+  "pit-wall": ["Pit Wall", "Your workspace. It contains RaceDays and shows crew activity across their laps."],
+  raceday: ["RaceDay", "A software project inside a Pit Wall. It keeps the source code, build history, and laps together."],
+  lap: ["Lap", "A build session in a RaceDay, from the request through implementation, testing, and approval."],
+  "practice-run": ["Practice run", "A built-in demo that builds the Fieldwork app using bundled responses. It needs Docker and works without a model API key."],
+  crew: ["Pit Crew", "The group of specialist agents that plans, builds, tests, and reviews your software."],
+  "race-engineer": ["Race Engineer", "The lead agent. It turns your request into a plan and coordinates the specialist agents."],
+  scrutineers: ["Scrutineers", "Independent reviewers who check the work and the test evidence before each stage can pass."],
+  "pit-lane": ["Pit Lane", "The map of build stages. Select a stage or an agent to see its progress and execution details."],
+  debrief: ["Lap Debrief", "A report with the original request, the plan, the acceptance criteria, and the decisions made during the run."],
+  "parc-ferme": ["Parc Fermé", "Where you download the approved build or launch its sandbox preview after the required checks pass."],
+  telemetry: ["Telemetry", "The event log for a build run, including tool calls, test results, and approvals."],
+  "team-radio": ["Team Radio", "Chat with the lead agent about the current build run."],
+  "power-unit": ["Power Unit", "Settings for the AI model provider and the models assigned to each agent."],
+  "pit-setup": ["Pit Setup", "Settings for Docker resources, how many runs can work in parallel, and local readiness checks."],
+  toolbox: ["Toolbox", "Where you configure the Skills and MCP tools that agents can use."],
+  "setup-book": ["Setup Book", "Saved decisions, fixes, and verified patterns the crew can reuse on later runs."],
+  "track-release": ["Track Release", "The stage that packages the tested source and makes the approved build available."],
+};
 const number = new Intl.NumberFormat();
 const money = (value) => "$" + Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 5, minimumFractionDigits: 2 });
 const timestamp = (value) => value ? new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
@@ -29,15 +49,107 @@ function node(tag, attributes = {}, ...children) {
   return element;
 }
 
-const button = (text, handler, style = "") => node("button", { type: "button", class: "button " + style, onclick: handler }, text);
+const button = (text, handler, style = "", term) => node("button",
+  { ...(term && termHint(term)), type: "button", class: "button " + style, onclick: handler }, text);
 const anchor = (text, href, style = "") => node("a", { href, class: "button " + style }, text);
 const muted = (...items) => node("small", {}, items);
 const actions = (...items) => node("div", { class: "actions" }, items);
 const code = (text) => node("code", {}, text);
-const sectionHeading = (name, action) => node("div", { class: "section-heading" }, node("h2", {}, name), action);
+const sectionHeading = (name, action, term) => node("div", { class: "section-heading" },
+  term ? node("div", { class: "term-label" }, node("h2", {}, name), termHelp(term)) : node("h2", {}, name), action);
 const list = (items) => node("ul", { class: "criteria" }, items.map((item) => node("li", {}, item)));
 const facts = (pairs) => node("dl", { class: "facts" }, pairs.map(([name, value]) =>
   [node("dt", {}, name), node("dd", {}, value ?? "—")]));
+
+const termHint = (term) => ({ "data-f1-term": term, "aria-describedby": "f1-term-" + term });
+
+function termHelp(term) {
+  return node("button", { ...termHint(term), type: "button", class: "term-help",
+    "aria-label": "About " + f1Terms[term][0] }, node("span", { "aria-hidden": "true" }, "?"));
+}
+
+function setupTermHelp() {
+  const tooltip = node("div", { class: "term-tooltip", "aria-hidden": "true", hidden: true });
+  document.body.append(tooltip, node("div", { hidden: true }, Object.entries(f1Terms).map(([term, [, definition]]) =>
+    node("span", { id: "f1-term-" + term }, definition))));
+  let target;
+  let pinned = false;
+  let timer;
+
+  function dismiss() {
+    clearTimeout(timer);
+    tooltip.hidden = true;
+    target = null;
+    pinned = false;
+  }
+
+  function position() {
+    if (!target?.isConnected) return dismiss();
+    const anchor = target.getBoundingClientRect();
+    if (anchor.bottom < 0 || anchor.top > window.innerHeight) return dismiss();
+    const { offsetWidth: width, offsetHeight: height } = tooltip;
+    const gap = 6;
+    const inset = 8;
+    const left = Math.max(inset, Math.min(anchor.left, document.documentElement.clientWidth - width - inset));
+    const below = anchor.bottom + gap;
+    const top = below + height <= window.innerHeight - inset ? below : anchor.top - height - gap;
+    tooltip.style.left = left + "px";
+    tooltip.style.top = Math.max(inset, top) + "px";
+  }
+
+  function show(trigger, stick = false) {
+    clearTimeout(timer);
+    target = trigger;
+    pinned = stick;
+    tooltip.textContent = f1Terms[trigger.dataset.f1Term][1];
+    tooltip.hidden = false;
+    position();
+  }
+
+  function scheduleDismiss() {
+    if (pinned) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (!target?.matches(":hover, :focus-visible") && !tooltip.matches(":hover")) dismiss();
+    }, 150);
+  }
+
+  const triggerFor = (event) => event.target.closest("[data-f1-term]");
+  document.addEventListener("pointerover", (event) => {
+    const trigger = triggerFor(event);
+    if (trigger && event.pointerType !== "touch" && (!pinned || target === trigger)) {
+      if (target === trigger) clearTimeout(timer);
+      else show(trigger);
+    }
+  });
+  document.addEventListener("pointerout", (event) => {
+    if (target && target === triggerFor(event) && !target.contains(event.relatedTarget)) scheduleDismiss();
+  });
+  tooltip.addEventListener("pointerenter", () => clearTimeout(timer));
+  tooltip.addEventListener("pointerleave", scheduleDismiss);
+  document.addEventListener("focusin", (event) => {
+    const trigger = triggerFor(event);
+    if (trigger?.matches(":focus-visible") && (!pinned || target !== trigger)) show(trigger);
+  });
+  document.addEventListener("focusout", (event) => {
+    if (target && target === triggerFor(event)) dismiss();
+  });
+  document.addEventListener("click", (event) => {
+    const trigger = triggerFor(event);
+    if (trigger?.classList.contains("term-help") && (!pinned || target !== trigger)) show(trigger, true);
+    else if (!tooltip.contains(event.target)) dismiss();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && target) {
+      event.preventDefault();
+      dismiss();
+    }
+  });
+  window.addEventListener("resize", () => { if (target) position(); });
+  document.addEventListener("scroll", () => { if (target) position(); }, true);
+  const observer = new MutationObserver(() => { if (target && !target.isConnected) dismiss(); });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
 
 function badge(value, text) {
   const normalized = String(value || "pending").toLowerCase();
@@ -63,12 +175,12 @@ function notify(text) {
 
 async function api(path, body) {
   const options = body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Omni-Token": state.csrf },
+    method: "POST", headers: { "Content-Type": "application/json", "X-Pitcrew-Token": state.csrf },
     body: JSON.stringify(body),
   };
   const response = await fetch(path, options);
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "Workspace request failed");
+  if (!response.ok) throw new Error(result.error || "Pit Wall request failed");
   return result;
 }
 
@@ -87,25 +199,27 @@ function heading(title, description, controls, className = "") {
 
 function renderSidebar(current) {
   if (!state.workspace) return;
-  const link = (label, icon, href, selected) => node("a",
-    { href, class: "nav-link" + (selected ? " selected" : ""), "aria-current": selected ? "location" : null },
+  const link = (label, icon, href, selected, term) => node("a",
+    { ...(term && termHint(term)), href, class: "nav-link" + (selected ? " selected" : ""),
+      "aria-current": selected ? "location" : null },
     node("span", { class: "nav-icon", "aria-hidden": "true" }, icon), label);
-  $("#navigation").replaceChildren(link("Workspace", "⌂", "#workspace", !current.project),
-    node("span", { class: "nav-title" }, "Projects"),
+  $("#navigation").replaceChildren(link("Pit Wall", "⌂", "#workspace", !current.project, "pit-wall"),
+    node("span", { class: "nav-title" }, "RaceDays"),
     ...state.workspace.projects.map((project) => link(project.name, "◇", projectURL(project.id), current.project === project.id)));
-  const crumbs = [node("a", { href: "#workspace" }, "Workspace")];
+  const crumbs = [node("a", { href: "#workspace" }, "Pit Wall")];
   if (state.project) {
     crumbs.push(node("span", { class: "separator", "aria-hidden": "true" }, "/"));
     crumbs.push(current.session ? node("a", { href: projectURL(current.project) }, state.project.project.name)
       : node("span", { class: "breadcrumb-current", "aria-current": "page" }, state.project.project.name));
   }
   if (state.session) crumbs.push(node("span", { class: "separator", "aria-hidden": "true" }, "/"),
-    node("span", { class: "breadcrumb-current", "aria-current": "page" }, "Session " + state.session.id.slice(0, 8)));
+    node("span", { class: "breadcrumb-current", "aria-current": "page" }, "Lap " + state.session.id.slice(0, 8)));
   $("#breadcrumbs").replaceChildren(...crumbs);
 }
 
-function metric(label, value, addition) {
-  return node("div", { class: "metric" }, node("span", { class: "metric-label" }, label),
+function metric(label, value, addition, term) {
+  return node("div", { class: "metric" },
+    node("span", { class: "metric-label" + (term ? " term-label" : "") }, label, term && termHelp(term)),
     node("strong", { class: "metric-value" }, value), addition && muted(addition));
 }
 
@@ -148,10 +262,18 @@ function formDialog(title, fields, submitText, submit, wide = false) {
 }
 
 function newProject() {
-  formDialog("New project", [
-    field("Project name", node("input", { name: "name", placeholder: "Customer portal", required: true, maxlength: 100 })),
+  formDialog("New RaceDay", [
+    field("RaceDay name", node("input", { name: "name", placeholder: "Customer portal", required: true, maxlength: 100 })),
     field("Description", node("textarea", { name: "description", rows: 3, maxlength: 1000 })),
-  ], "Create project", async (data) => {
+    field("GitHub repository (optional)", node("input",
+      { name: "github_url", type: "url", placeholder: "https://github.com/owner/repo", maxlength: 240 })),
+    field("GitHub branch (optional)", node("input",
+      { name: "github_branch", placeholder: "Repository default branch", maxlength: 200 })),
+    muted("The crew reads relevant source from the selected repository using your configured model provider."),
+  ], "Create RaceDay", async (data) => {
+    if (data.github_url.trim() && !state.workspace.capabilities?.github_racedays) {
+      throw new Error("Restart the Pit Wall server to connect a GitHub repository.");
+    }
     const project = await api("/api/projects", data);
     location.hash = projectURL(project.id);
   });
@@ -160,9 +282,11 @@ function newProject() {
 function settings() {
   if (!state.workspace) return;
   const provider = state.workspace.provider;
+  const cliProviders = ["claude-code", "github-copilot"];
   const type = node("select", { name: "kind" },
     [["demo", "Built-in demo"], ["foundry", "Microsoft Foundry"], ["azure-gateway", "Azure AI Gateway for Foundry"],
-      ["compatible", "Compatible Chat Completions"]].map(([id, name]) =>
+      ["compatible", "Compatible Chat Completions"], ["local", "Local model"],
+      ["claude-code", "Claude Code"], ["github-copilot", "GitHub Copilot CLI"]].map(([id, name]) =>
       node("option", { value: id, selected: provider.kind === id }, name)));
   const endpoint = node("input", { name: "endpoint", type: "url", placeholder: "https://resource.services.ai.azure.com/openai/v1",
     value: provider.endpoint || "" });
@@ -253,15 +377,24 @@ function settings() {
     field(credentialName, credential), node("label", { class: "checkbox" }, remember, " Remember in the system keyring"),
     credentialStatus, forgetLabel, clearLabel, actions(loadModels, catalog), deploymentHint, modelStatus, choicesLabel,
     pool, manualModel);
+  const cliModel = node("input", { name: "model", placeholder: "Use the CLI default",
+    value: cliProviders.includes(provider.kind) ? provider.model : "" });
+  const cliSettings = node("div", { class: "fields", hidden: true },
+    muted("Install and sign in to the selected CLI on the machine running Pit Crew Harness. Use /setup in the terminal for guidance."),
+    field("Model ID (optional)", cliModel));
   const configure = () => {
     const kind = type.value;
     const foundry = kind === "foundry";
-    connected.hidden = kind === "demo";
-    endpoint.required = kind !== "demo";
+    const cli = cliProviders.includes(kind);
+    const httpProvider = kind !== "demo" && !cli;
+    connected.hidden = endpoint.disabled = credential.disabled = forget.disabled = clear.disabled = !httpProvider;
+    cliSettings.hidden = cliModel.disabled = !cli;
+    remember.disabled = !httpProvider || !provider.keyring_available;
+    endpoint.required = httpProvider;
     endpointName.textContent = foundry ? "Foundry project endpoint" : "API endpoint";
     endpoint.placeholder = foundry ? "Paste your project endpoint here"
       : kind === "azure-gateway" ? "https://gateway.region.ai.gateway.azure.com/default/models/openai/v1/chat/completions"
-        : "https://provider.example/v1";
+        : kind === "local" ? "http://127.0.0.1:11434/v1" : "https://provider.example/v1";
     credentialName.textContent = foundry ? "Foundry API key or Microsoft Entra access token" : "Provider credential";
     foundryGuide.hidden = endpointExample.hidden = !foundry;
     loadModels.textContent = foundry ? "Load deployments" : "Load models";
@@ -273,8 +406,8 @@ function settings() {
     const url = endpoint.value.replace(/\/+$/, "");
     const resourceOnly = /^https:\/\/[^/?#]+\.(?:services\.ai|openai)\.azure\.com(?::\d+)?(?:\/openai\/v1)?$/i.test(url);
     const automatic = foundry && !resourceOnly;
-    manualModel.hidden = model.disabled = automatic;
-    model.required = !automatic && kind !== "demo";
+    manualModel.hidden = model.disabled = automatic || !httpProvider;
+    model.required = !model.disabled;
     loadModels.hidden = foundry && resourceOnly;
     deploymentHint.hidden = !automatic;
     resourceHint.hidden = !(foundry && resourceOnly);
@@ -309,12 +442,12 @@ function settings() {
       const result = await api("/api/provider/test", {});
       notify("Model responded · " + result.model);
     }, event), "quiet"));
-  const form = formDialog("Provider settings", [field("Provider", type), connected, advanced], "Save settings", async (data) => {
+  const form = formDialog("Power Unit", [field("Provider", type), connected, cliSettings, advanced], "Save settings", async (data) => {
     for (const field of ["input_rate", "output_rate", "compute_rate"]) data[field] = Number(data[field]);
     for (const field of ["remember_key", "forget_key", "clear_key"]) data[field] = Boolean(data[field]);
     if (type.value === "foundry" && model.disabled) data.role_models = roleModels();
     state.workspace.provider = await api("/api/provider", data);
-    notify(state.workspace.provider.deployments ? "Foundry deployments saved for workspace agents." : "Provider settings saved.");
+    notify(state.workspace.provider.deployments ? "Foundry deployments saved for workspace agents." : "Power Unit settings saved.");
     await refresh(true);
   });
   form.classList.add("provider-settings-form");
@@ -336,7 +469,7 @@ function livePressure() {
         ["Reserved here", resources(reserved)],
         ["Other Docker containers", external ? `${external.containers} running · ${resources(external)}` : "Usage unavailable"],
       ]), holds.length ? list(holds.map((hold) =>
-        `Session ${hold.session_id.slice(0, 8)} · ${names[hold.stage] || hold.stage} · ${hold.tasks.join(", ")} · ${resources(hold)}`))
+        `Lap ${hold.session_id.slice(0, 8)} · ${stageNames[hold.stage] || hold.stage} · ${hold.tasks.join(", ")} · ${resources(hold)}`))
         : muted("No tasks hold capacity in this workspace."));
     } catch (error) {
       body.replaceChildren(node("p", { class: "error-text" }, error.message));
@@ -399,11 +532,11 @@ async function executionSettings(event) {
       node("thead", {}, node("tr", {}, ["Task", "Sizing", ...columns.map((column) => column[1])]
         .map((label) => node("th", { scope: "col" }, label)))),
       node("tbody", {}, rows.map(({ row }) => row))));
-    formDialog("Execution settings", [
+    formDialog("Pit Setup", [
       muted(capacity ? `Docker engine capacity · ${number.format(capacity.cpu)} CPU cores · ${number.format(capacity.ram)} MiB`
         : "Docker is unavailable. The table shows reference sizes."),
       localPreflight(), livePressure(),
-      field("Concurrent sessions across projects", node("input", { name: "sessions", type: "number", required: true,
+      field("Concurrent laps across RaceDays", node("input", { name: "sessions", type: "number", required: true,
         min: 1, max: 8, value: policy.sessions })),
       node("label", { class: "checkbox" }, node("input", { name: "parallel_reviews", type: "checkbox", checked: policy.parallel_reviews }),
         " Run two independent reviewers per gate"),
@@ -416,7 +549,7 @@ async function executionSettings(event) {
           .filter(([key, input]) => !wasCustom || key in previous || Number(input.value) !== limits[key])
           .map(([key, input]) => [key, Number(input.value)]))]));
       await api("/api/execution", { sessions: Number(data.sessions), parallel_reviews: Boolean(data.parallel_reviews), overrides });
-      notify("Execution settings saved.");
+      notify("Pit setup saved.");
     }, true);
   }, event);
 }
@@ -432,10 +565,10 @@ function startSession(project, sample = false) {
     settings();
     return;
   }
-  formDialog("New session", [
-    field("Request for the Lead Agent", node("textarea", { rows: 7, name: "prompt", required: true, maxlength: 16000,
+  formDialog("New lap", [
+    field("Brief for the race engineer", node("textarea", { rows: 7, name: "prompt", required: true, maxlength: 16000,
       placeholder: "Describe the software, constraints, and what should work when it’s ready." })),
-  ], "Start session", create);
+  ], "Start lap", create);
 }
 
 async function perform(operation, event) {
@@ -450,60 +583,65 @@ function workspacePage() {
   const deployments = provider.deployments?.filter(({ chat }) => chat !== false) || [];
   const sum = (key) => projects.reduce((total, project) => total + project[key], 0);
   const projectCards = projects.map((project) => node("a", { class: "project-card", href: projectURL(project.id) },
-    node("div", { class: "card-heading" }, node("strong", {}, project.name), badge(project.health, project.health ? null : "No sessions")),
+    node("div", { class: "card-heading" }, node("strong", {}, project.name), badge(project.health, project.health ? null : "No laps")),
     project.description && node("p", { class: "muted" }, limit(project.description)),
-    node("div", { class: "row-meta" }, muted(number.format(project.session_count) + " sessions"), muted(money(project.model_cost + project.compute_cost)))));
-  return [heading("Workspace", "Manage projects and follow each build from request through verification.",
-    actions(button("+ New project", newProject, "primary"))),
-    node("div", { class: "metric-grid" }, metric("Projects", number.format(projects.length)),
-      metric("Sessions", number.format(sum("session_count"))), metric("Active agents", number.format(sum("active_agents")),
+    node("div", { class: "row-meta" }, muted(number.format(project.session_count) + (project.session_count === 1 ? " lap" : " laps")), muted(money(project.model_cost + project.compute_cost)))));
+  return [heading("Pit Wall", "Manage RaceDays and follow each build from lap brief to approval.",
+    actions(button("+ New RaceDay", newProject, "primary"))),
+    node("div", { class: "metric-grid" }, metric("RaceDays", number.format(projects.length), null, "raceday"),
+      metric("Laps", number.format(sum("session_count")), null, "lap"), metric("Active crew", number.format(sum("active_agents")),
         number.format(sum("failed_agents")) + " failed attempts"), metric("Estimated spend", money(sum("model_cost") + sum("compute_cost")),
         number.format(sum("tokens")) + " provider tokens")),
     deployments.length > 0 && node("section", { class: "panel card-heading workspace-models" },
-      node("div", {}, node("h2", {}, "Workspace models"),
+      node("div", {}, node("h2", {}, "Power units"),
         muted(`${number.format(deployments.length)} Foundry ${deployments.length === 1 ? "deployment" : "deployments"} available to agents`)),
       button("Manage models", settings, "quiet")),
-    sectionHeading("Projects"),
+    sectionHeading("RaceDays"),
     projects.length ? node("div", { class: "project-grid" }, projectCards)
-      : node("div", { class: "empty" }, node("h3", {}, "Create your first project"),
-        node("p", { class: "muted" }, "Give the Lead Agent a request, or try Fieldwork, the built-in expedition planner."),
-        button("Create project", newProject)),
-    node("section", { class: "panel" }, sectionHeading("Hive Memory", button("Explore Dreaming", showDreaming, "quiet")),
+      : node("div", { class: "empty" }, node("h3", {}, "Create your first RaceDay"),
+        node("p", { class: "muted" }, "Send the race engineer a brief or try the Fieldwork practice run."),
+        button("Create RaceDay", newProject)),
+    node("section", { class: "panel" }, sectionHeading("Setup Book", button("Open setup book", showDreaming, "quiet")),
     node("div", { class: "hive" }, [[memory.nodes, "Knowledge nodes"], [memory.links, "Graph links"],
-      [memory.applications, "Successful applications"]].map(([value, text]) =>
+      [memory.applications, "Successful applications"], [memory.agent_playbooks ?? 0, "Agent playbooks"]].map(([value, text]) =>
       node("div", {}, node("strong", {}, number.format(value)), muted(text)))),
-    muted(memory.last_dream ? "Last consolidated " + timestamp(memory.last_dream.at) : "Dreaming runs between active sessions."))];
+    muted(memory.last_dream ? "Last consolidated " + timestamp(memory.last_dream.at) : "The crew consolidates its notes between laps."))];
 }
 
 function projectPage() {
   const { project, sessions } = state.project;
   const vitals = state.workspace.projects.find((item) => item.id === project.id);
-  return [heading(project.name, project.description, actions(button("Run demo", () => startSession(project.id, true), "quiet"),
-    button("+ New session", () => startSession(project.id), "primary"))),
+  return [heading(project.name, project.description, actions(!project.github_url &&
+    button("Start practice run", () => startSession(project.id, true), "quiet", "practice-run"),
+    button("+ New lap", () => startSession(project.id), "primary"))),
+    project.github_url && node("p", { class: "muted" }, "GitHub repository · ",
+      node("a", { href: project.github_url, target: "_blank", rel: "noopener noreferrer" }, project.github_url.replace(/\.git$/, "")),
+      project.github_branch && " · " + project.github_branch),
     state.engine && !state.engine.ready && node("p", { class: "notice" }, state.engine.detail),
-    sectionHeading("Project vitals"),
+    sectionHeading("RaceDay overview"),
     node("div", { class: "metric-grid" },
-      metric("Sessions", number.format(vitals.session_count)),
+      metric("Laps", number.format(vitals.session_count)),
       metric("Estimated spend", money(vitals.model_cost + vitals.compute_cost),
         money(vitals.model_cost) + " model · " + money(vitals.compute_cost) + " compute"),
-      metric("Active agents", number.format(vitals.active_agents), number.format(vitals.failed_agents) + " failed attempts"),
+      metric("Active crew", number.format(vitals.active_agents), number.format(vitals.failed_agents) + " failed attempts"),
       metric("Build health", labels[vitals.health] || "Idle", number.format(vitals.tokens) + " total tokens")),
-    sectionHeading("Sessions"),
+    sectionHeading("Laps", null, "lap"),
     sessions.length ? node("div", { class: "session-list" }, sessions.map((session) =>
       node("a", { class: "session-row", href: sessionURL(project.id, session.id) },
-        node("div", {}, node("strong", {}, limit(session.prompt)), muted(timestamp(session.created) + " · " + (names[session.stage] || session.stage))),
+        node("div", {}, node("strong", {}, limit(session.prompt)),
+          muted(timestamp(session.created) + " · " + (stageNames[session.stage] || session.stage))),
         badge(session.state))))
-      : node("div", { class: "empty" }, node("h3", {}, "No sessions yet"),
-        node("p", { class: "muted" }, "Start a session to give the Lead Agent your requirements."))];
+      : node("div", { class: "empty" }, node("h3", {}, "No laps yet"),
+        node("p", { class: "muted" }, "Start a lap to send the race engineer your brief."))];
 }
 
 function summaryPanel(session) {
-  const decisions = session.gates.flatMap((gate) => (gate.artifact?.decisions || []).map((item) => names[gate.stage] + " · " + item));
+  const decisions = session.gates.flatMap((gate) => (gate.artifact?.decisions || []).map((item) => stageNames[gate.stage] + " · " + item));
   return [facts([["Branch", code(session.branch)], ["Status", badge(session.state)],
     ["Estimated cost", money(session.cost)], ["Provider tokens", number.format(session.tokens)]]),
     session.error && node("p", { class: "error-text" }, session.error),
-    node("h3", {}, "Original request"), node("p", {}, session.prompt),
-    session.plan && [node("h3", {}, "Lead plan"), node("p", { class: "muted" }, session.plan.summary),
+    node("h3", {}, "Lap brief"), node("p", {}, session.prompt),
+    session.plan && [node("h3", {}, "Run plan"), node("p", { class: "muted" }, session.plan.summary),
       list(stages.map(([id, name]) => name + " · " + session.plan.stages[id])),
       node("h3", {}, "Acceptance criteria"), list(session.plan.criteria.map((item) => item.id + " · " + item.description))],
     decisions.length > 0 && [node("h3", {}, "Decisions"), list(decisions)]];
@@ -558,9 +696,22 @@ function previewPanel(session) {
 
 function outputPanel(session) {
   if (session.state !== "completed") return node("div", { class: "empty" }, node("h3", {}, "Build pending"),
-    node("p", { class: "muted" }, "The build and preview become available when all factory gates pass."));
+    node("p", { class: "muted" }, "Parc Fermé opens after the crew clears every check."));
   const isWeb = session.gates.find((gate) => gate.stage === "architecture")?.artifact?.mode === "web";
-  return [isWeb && previewPanel(session), node("h3", {}, "Verified build"),
+  const remote = state.project?.project.github_url?.replace(/\.git$/, "");
+  const publish = (event) => perform(async () => {
+    const result = await api("/api/sessions/" + session.id + "/publish", {});
+    notify("Published " + result.branch);
+    await refresh(true);
+  }, event);
+  return [isWeb && previewPanel(session),
+    remote && session.github_commit && node("div", { class: "panel" },
+      node("h3", {}, "GitHub commit"), code(session.github_commit),
+      actions(session.github_published
+        ? node("a", { class: "button quiet", href: remote + "/tree/" + session.github_published,
+          target: "_blank", rel: "noopener noreferrer" }, "Open lap branch")
+        : button("Push lap branch to GitHub", publish, "quiet"))),
+    node("div", { class: "term-label" }, node("h3", {}, "Approved build"), termHelp("parc-ferme")),
     session.bundle && anchor("Download build", "/api/sessions/" + session.id + "/build"),
     session.bundle && node("code", { class: "output-path" }, session.bundle),
     list(session.gates.find((gate) => gate.stage === "deploy")?.artifact?.instructions || [])];
@@ -616,6 +767,17 @@ async function engineStatus() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  if (location.protocol === "file:") {
+    $(".skip").remove();
+    $(".shell").replaceWith(node("main", {},
+      node("section", { class: "empty" },
+        node("h1", {}, "Open Pit Wall"),
+        node("p", { class: "muted" }, "Start the local server with ", code("make run"), ", then open the dashboard."),
+        node("a", { class: "button primary", href: "http://127.0.0.1:8765/" }, "Open dashboard"))));
+    return;
+  }
+  setupTermHelp();
+  $("#f1-terms").addEventListener("click", () => openDialog("F1 terms", facts(Object.values(f1Terms))));
   $(".skip").addEventListener("click", (event) => {
     event.preventDefault();
     $("#content").focus();

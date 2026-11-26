@@ -8,40 +8,30 @@ from contextlib import contextmanager
 from itertools import count, groupby
 
 
-MONOGRAM = (
-    "       @@@@@@@@@@@@@@",
-    "      @%%%%*******%%%@@",
-    "      @%%%*       @%%+%@",
-    "     @%%%*         @###*:.",
-    "     @%%%*        @#+##*:..",
-    "    @%%%*       @@###**::..",
-    "    @%%%+@@@@@@@##***:::...",
-    "   @####***##+###*::::....",
-    "   @###*   @*###*::.....",
-    "  @###*      @*##@@..",
-    "  @###*        @#+#@@",
-    " @****          @****@",
-    "  :::::...       ::::::.",
-    "    .....          ......",
+PIT_ENTRY = (
+    r"   ____________     __________",
+    r"  ##############\   \=========|",
+    r"  ###############\   \========|",
+    r"  ___________ \###\   '-------'",
+    r"  ###########\ \###\___________",
+    r"   '----------' \##############",
+    r"                 '-------------",
 )
-CHARACTER_RAMP = " .:-=+*#%@"
-TETHER_ROW = 7
-MAX_TETHER = 4
-SCAN_FRAMES = len(MONOGRAM) + 2
-TRAIL = (("*", "gold"), ("o", "pink"), (".", "violet"), (".", "blue"))
-WORDMARK = ("R I T T A I", "H A R N E S S")
+ART_WIDTH = max(map(len, PIT_ENTRY)) + 4
+SHINE_FRAMES = (ART_WIDTH + len(PIT_ENTRY) * 2) // 2
+TWINKLE = (" ", ".", "+", "*", "+", ".", " ", "+")
+TRAIL = (("*", "gold"), ("o", "shine"), (".", "blue"), (".", "steel"))
+WORDMARK = "Pit Crew Harness"
 COLORS = {
     # RGB, xterm-256 index, basic ANSI foreground
-    "gold": ((255, 217, 133), 222, 93),
-    "pink": ((252, 147, 215), 212, 95),
-    "lilac": ((217, 182, 255), 183, 95),
-    "violet": ((175, 136, 255), 141, 95),
-    "blue": ((120, 154, 253), 111, 94),
+    "gold": ((255, 200, 98), 221, 93),
+    "blue": ((99, 166, 255), 75, 94),
+    "steel": ((57, 106, 173), 61, 34),
+    "shine": ((218, 235, 255), 195, 97),
     "cyan": ((98, 224, 247), 81, 96),
     "mint": ((143, 245, 196), 121, 92),
     "coral": ((255, 153, 160), 210, 91),
     "muted": ((157, 175, 202), 146, 37),
-    "slate": ((104, 116, 180), 103, 34),
 }
 STATE_COLORS = {"queued": "gold", "running": "cyan", "completed": "mint", "failed": "coral", "cancelled": "muted"}
 CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
@@ -76,57 +66,48 @@ class Terminal:
         return text
 
     def banner_frame(self, step, columns):
-        title = self.style(WORDMARK[0], "lilac", bold=True) + " " + self.style(WORDMARK[1], "cyan", bold=True)
-        hints = self.style("/help", "mint") + " for commands"
-        if columns < 34:
-            return [self.style("RittaiHarness", "lilac", bold=True), self.pulse(step), hints]
+        title = self.style("Pit Crew", "blue", bold=True) + self.style(" Harness", "gold", bold=True)
+        hints = self.style("/help", "blue") + " for commands"
+        if columns < ART_WIDTH:
+            return [title, hints]
 
-        wide = columns >= 64
+        wide = columns >= ART_WIDTH + 4 + len("/help for commands")
+        twinkle = TWINKLE[step - SHINE_FRAMES] if step >= SHINE_FRAMES else " "
         lines = [""]
-        for row, shape in enumerate(MONOGRAM):
-            cells = self.monogram_row(shape, row, step)
-            line = "".join(self.style("".join(char for char, _ in group), tone, bold=tone in ("gold", "mint"))
+        for row, shape in enumerate(PIT_ENTRY):
+            cells = []
+            for column, char in enumerate(shape):
+                pit_box = row <= 3 and column >= 20
+                distance = abs(column + 2 * row - 2 * step)
+                if step < SHINE_FRAMES and distance <= 2 and char != " ":
+                    char = "@" if char == "#" and not self.palette else char
+                    tone = "shine" if distance < 2 else "blue"
+                else:
+                    tone = "gold" if pit_box else "blue"
+                cells.append((char, tone))
+            if row == 0:
+                cells.extend((char, "gold") for char in twinkle.rjust(ART_WIDTH - len(shape)))
+            line = "".join(self.style("".join(char for char, _ in group), tone, bold=True)
                            for tone, group in groupby(cells, key=lambda cell: cell[1]))
-            if wide and row in (5, 8):
-                line += " " * (36 - len(cells)) + (title if row == 5 else hints)
+            if wide and row in (2, 4):
+                line += " " * (ART_WIDTH + 4 - len(cells)) + (title if row == 2 else hints)
             lines.append(line)
         if not wide:
             lines.extend((title, hints))
         lines.append("")
         return lines
 
-    def monogram_row(self, shape, row, step):
-        cells = [(" ", None)] * 2
-        shadow, highlight = ("violet", "lilac") if row < TETHER_ROW else ("blue", "cyan")
-        for char in shape:
-            strength = CHARACTER_RAMP.index(char)
-            if row >= step:
-                cells.append((CHARACTER_RAMP[strength // 3], "slate"))
-            elif strength <= 3:
-                cells.append((char, "slate"))
-            elif step == row + 1:
-                cells.append((CHARACTER_RAMP[min(strength + 1, len(CHARACTER_RAMP) - 1)], "mint"))
-            else:
-                cells.append((char, highlight if strength >= 8 else shadow))
-
-        if row == TETHER_ROW and row < step:
-            length = min(MAX_TETHER, step - row)
-            cable = [("-", "cyan")] * (length - 1) + [("o", "mint")]
-            cells[5 - length:5] = reversed(cable)
-            cells[8:11] = [(char, "gold") for char in "[=]"]
-            cells.extend(cable)
-        return cells
-
     def banner(self):
         columns, rows = shutil.get_terminal_size()
-        if columns < 19 or rows < 6:
-            self.write("RittaiHarness")
+        if columns < len(WORDMARK) or rows < 4:
+            self.write(WORDMARK)
             return
-        if rows < len(MONOGRAM) + 6:
-            columns = min(columns, 33)
-        last = SCAN_FRAMES - 1
-        frames = range(last + 1) if self.animate else (last,)
-        if self.animate:
+        if rows < len(PIT_ENTRY) + 6:
+            columns = min(columns, ART_WIDTH - 1)
+        last = SHINE_FRAMES + len(TWINKLE) - 1
+        animate = self.animate and columns >= ART_WIDTH
+        frames = range(last + 1) if animate else (last,)
+        if animate:
             print("\033[?25l", end="", flush=True)
         try:
             for index, step in enumerate(frames):
@@ -134,9 +115,9 @@ class Terminal:
                 redraw = f"\033[{len(lines)}F\033[J" if index else ""
                 print(redraw + "\n".join(lines), flush=True)
                 if step < last:
-                    time.sleep(0.055)
+                    time.sleep(0.045)
         finally:
-            if self.animate:
+            if animate:
                 print("\033[?25h", end="", flush=True)
 
     def pulse(self, step):
@@ -148,14 +129,14 @@ class Terminal:
             column = head - offset if phase < width else head + offset
             if 0 <= column < width:
                 trail[column] = self.style(char, tone, bold=offset == 0)
-        return self.style("[", "violet") + "".join(trail) + self.style("]", "violet")
+        return self.style("[", "steel") + "".join(trail) + self.style("]", "steel")
 
     def write(self, text="", *, label="", tone="mint"):
         print(self.style(terminal_text(label), tone, bold=True) + terminal_text(text), flush=True)
 
     def prompt(self, attached, *, readline):
-        prompt = "lead>" if attached else "rittai>"
-        code = self.palette.get("mint" if attached else "lilac")
+        prompt = "radio>" if attached else "pitcrew>"
+        code = self.palette.get("mint" if attached else "blue")
         if code and readline:
             return f"\001\033[1;{code}m\002{prompt}\001{RESET}\002 "
         return prompt + " "

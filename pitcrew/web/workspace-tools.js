@@ -4,8 +4,8 @@ const extensionConfig = "/api/extensions/config";
 const skillAPI = "/api/extensions/skill";
 
 function showExtensions() {
-  const content = node("div", { class: "fields" }, muted("Loading extensions…"));
-  openDialog("Extensions", content, true);
+  const content = node("div", { class: "fields" }, muted("Loading toolbox…"));
+  openDialog("Toolbox", content, true);
 
   const render = async (check = false) => {
     const controls = actions(button("Edit configuration", editExtensionConfig, "primary"),
@@ -14,13 +14,14 @@ function showExtensions() {
     try {
       const config = check ? await api("/api/extensions/check", {}) : await api("/api/extensions");
       const skills = config.skills.map((skill) => node("div", { class: "extension-row" },
-        node("div", {}, node("strong", {}, skill.name), muted(skill.roles.join(", ") + " · " + (skill.resources.length + 1) + " files")),
+        node("div", {}, node("strong", {}, skill.name),
+          muted(skill.roles.map((role) => names[role]).join(", ") + " · " + (skill.resources.length + 1) + " files")),
         button("Edit files", () => editSkill(skill.name), "quiet")));
       const servers = config.mcp.map((server) => node("section", { class: "extension-item" },
         node("div", { class: "extension-row" }, node("div", {}, node("strong", {}, server.name),
           muted(server.isolation || (server.oauth ? "Browser OAuth" : server.transport))),
           server.oauth && badge(server.credentials_ready ? "ready" : "pending", server.credentials_ready ? "Connected" : "Sign-in needed")),
-        list(Object.entries(server.tools).map(([tool, grants]) => tool + " · " + grants.join(", "))),
+        list(Object.entries(server.tools).map(([tool, grants]) => tool + " · " + grants.map((role) => names[role]).join(", "))),
         server.oauth && actions(server.credentials_ready
           ? button("Disconnect", (event) => perform(async () => {
             await api("/api/extensions/oauth/disconnect", { name: server.name });
@@ -57,8 +58,8 @@ function editExtensionConfig(event) {
         current.writable && button("Insert OAuth example", () => {
           editor.value = editor.value.trimEnd() + (editor.value.trim() ? "\n\n" : "") + example;
           editor.focus();
-        }, "quiet"), button("Back to Extensions", showExtensions, "quiet")));
-    if (!current.writable) form.append(muted("This workspace loads its configuration from OMNI_EXTENSIONS."));
+        }, "quiet"), button("Back to Toolbox", showExtensions, "quiet")));
+    if (!current.writable) form.append(muted("This workspace loads its configuration from PITCREW_EXTENSIONS."));
     form.addEventListener("submit", (change) => {
       change.preventDefault();
       perform(async () => {
@@ -113,7 +114,7 @@ function editSkill(original = null) {
       field("File to edit", picker), field("File contents", editor),
       node("fieldset", { class: "skill-grants" }, node("legend", {}, "Agent roles"), grants.map(({ field }) => field)),
       actions(node("button", { class: "button primary", type: "submit" }, "Save Skill"),
-        button("Back to Extensions", showExtensions, "quiet")));
+        button("Back to Toolbox", showExtensions, "quiet")));
     form.addEventListener("submit", (change) => {
       change.preventDefault();
       perform(async () => {
@@ -130,6 +131,7 @@ function editSkill(original = null) {
 function showDreaming() {
   const history = node("div", { class: "fields" });
   const records = node("div", { class: "fields" });
+  const playbooks = node("div", { class: "fields" });
   const search = node("input", { type: "search", maxlength: 200, placeholder: "Search memory" });
   let historyPage = 0;
   let recordPage = 0;
@@ -138,7 +140,7 @@ function showDreaming() {
     const { history: runs, more } = await api("/api/memory/history?page=" + historyPage);
     history.replaceChildren(...runs.map((run) => node("div", { class: "extension-row" },
       node("strong", {}, timestamp(run.at)), muted(`${run.synthesized} patterns · ${run.pruned} pruned`))));
-    if (!runs.length) history.append(muted("No Dreaming runs yet."));
+    if (!runs.length) history.append(muted("No consolidation runs yet."));
     history.append(actions(historyPage > 0 && button("Previous runs", (event) => perform(async () => { historyPage--; await loadHistory(); }, event)),
       more && button("Older runs", (event) => perform(async () => { historyPage++; await loadHistory(); }, event))));
   };
@@ -152,7 +154,17 @@ function showDreaming() {
       recordPage > 0 && button("Previous records", (event) => perform(async () => { recordPage--; await loadRecords(); }, event)),
       result.more && button("More records", (event) => perform(async () => { recordPage++; await loadRecords(); }, event))));
   };
-  const searchForm = node("form", { class: "fields" }, field("Search workspace memory", search),
+  const loadPlaybooks = async () => {
+    if (state.workspace.memory.agent_playbooks === undefined) return;
+    const project = state.project?.project.id;
+    const result = await api("/api/memory/playbooks" + (project ? "?project=" + project : ""));
+    const entries = result.playbooks.map((item) => node("details", { class: "memory-record" },
+      node("summary", {}, (names[item.role] || item.role) + " · " + item.name, " · ", muted("Revision " + item.revision)),
+      list(item.lessons.map((lesson) => node("div", {}, lesson.lesson, node("p", { class: "muted" }, lesson.evidence))))));
+    playbooks.replaceChildren(...entries.length ? entries :
+      [muted("Playbooks appear after the crew has approved work and consolidated its notes.")]);
+  };
+  const searchForm = node("form", { class: "fields" }, field("Search crew notes", search),
     actions(node("button", { type: "submit", class: "button quiet" }, "Search")));
   searchForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -160,13 +172,14 @@ function showDreaming() {
     recordPage = 0;
     perform(loadRecords, { currentTarget: event.submitter });
   });
-  openDialog("Workspace Dreaming", node("div", { class: "fields" },
-    sectionHeading("Run history", button("Run Dreaming", (event) => perform(async () => {
+  openDialog("Setup Book", node("div", { class: "fields" },
+    sectionHeading("Consolidation history", button("Consolidate notes", (event) => perform(async () => {
       await api("/api/memory/dream", {});
       historyPage = recordPage = 0;
-      await Promise.all([loadHistory(), loadRecords(), refresh(true)]);
+      await Promise.all([loadHistory(), loadRecords(), loadPlaybooks(), refresh(true)]);
     }, event), "primary")),
-    muted("Dreaming consolidates workspace memory while the factory is idle."), history,
-    node("h3", {}, "Memory records"), searchForm, records), true);
-  perform(() => Promise.all([loadHistory(), loadRecords()]));
+    muted("The crew consolidates decisions and fixes between laps."), history,
+    node("h3", {}, "Agent playbooks"), playbooks,
+    node("h3", {}, "Crew notes"), searchForm, records), true);
+  perform(() => Promise.all([loadHistory(), loadRecords(), loadPlaybooks()]));
 }

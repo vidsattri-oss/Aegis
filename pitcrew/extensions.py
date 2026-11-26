@@ -10,6 +10,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
+from .config import environment
 from .contracts import INJECT, PERSONAS, require
 from .mcp import Client, remaining
 
@@ -25,7 +26,7 @@ BROWSER_SKILL_BYTES = 1_600_000
 
 
 def configuration(directory):
-    override = os.environ.get("OMNI_EXTENSIONS")
+    override = environment("PITCREW_EXTENSIONS")
     return (Path(override).resolve(), False) if override else (directory / "extensions.toml", True)
 
 

@@ -1,14 +1,29 @@
 """Managed monorepo and atomic stage commits in session worktrees."""
 import json
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from .contracts import require, safe_path
+from .contracts import MAX_BYTES, require, safe_path
 from .store import now
+
+GITHUB_URL = re.compile(r"https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9_.-]{1,100})/?\Z")
+GITHUB_OPTIONS = ("-c", "http.followRedirects=false",
+                  "-c", "credential.https://github.com.helper=!gh auth git-credential")
+
+
+def github_url(value):
+    match = GITHUB_URL.fullmatch(value) if isinstance(value, str) else None
+    require(match, "Enter a GitHub HTTPS repository URL such as https://github.com/owner/name")
+    owner, name = match.groups()
+    name = name.removesuffix(".git")
+    require(name and name not in (".", ".."), "Enter a GitHub repository name")
+    return f"https://github.com/{owner}/{name}.git"
 
 
 class Repository:
@@ -23,22 +38,113 @@ class Repository:
         if not (self.root / ".git").is_dir():
             self.root.mkdir(exist_ok=True)
             self.git(self.root, "init", "--initial-branch=main")
-        self.git(self.root, "config", "user.name", "RittaiHarness Lead")
-        self.git(self.root, "config", "user.email", "lead@rittaiharness.local")
+        self.git(self.root, "config", "user.name", "Pit Crew Harness Lead")
+        self.git(self.root, "config", "user.email", "lead@pitcrew.local")
         self.git(self.root, "config", "core.hooksPath", "/dev/null")
         self.git(self.root, "config", "commit.gpgSign", "false")
         if self.git(self.root, "rev-parse", "--verify", "HEAD", check=False).returncode:
-            self.git(self.root, "commit", "--allow-empty", "-m", "Initialize RittaiHarness monorepo")
+            self.git(self.root, "commit", "--allow-empty", "-m", "Initialize Pit Crew Harness monorepo")
 
     @staticmethod
-    def git(cwd, *args, check=True):
+    def git(cwd, *args, check=True, index=None, data=None, binary=False):
         env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
         env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_TERMINAL_PROMPT="0")
-        result = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True,
-                                errors="replace", timeout=45)
+        if index is not None:
+            env["GIT_INDEX_FILE"] = str(index)
+        result = subprocess.run(["git", *args], cwd=cwd, env=env, input=data, capture_output=True,
+                                timeout=45, **({} if binary else {"encoding": "utf-8", "errors": "replace"}))
         if check and result.returncode:
-            raise RuntimeError(f"Git {args[0]} failed: {result.stderr.strip()[-1500:]}")
+            detail = result.stderr.decode("utf-8", "replace") if binary else result.stderr
+            raise RuntimeError(f"Git {args[0]} failed: {detail.strip()[-1500:]}")
         return result
+
+    @staticmethod
+    def github_ref(project, suffix="head"):
+        return f"refs/pitcrew/github/{project}/{suffix}"
+
+    def import_github(self, project, url, branch):
+        ref = self.github_ref(project)
+        source = "HEAD"
+        if branch:
+            source = "refs/heads/" + branch
+            require(len(branch) <= 200 and self.git(self.root, "check-ref-format", source, check=False).returncode == 0,
+                    "Enter a valid GitHub branch name")
+        self.git(self.root, *GITHUB_OPTIONS, "fetch", "--no-tags", "--no-recurse-submodules", "--",
+                 github_url(url), f"{source}:{ref}")
+
+    def github_head(self, project):
+        return self.git(self.root, "rev-parse", "--verify", self.github_ref(project)).stdout.strip()
+
+    def github_inventory(self, base):
+        entries = {}
+        for entry in self.git(self.root, "ls-tree", "-r", "-l", "-z", base).stdout.rstrip("\0").split("\0"):
+            if not entry:
+                continue
+            metadata, name = entry.split("\t", 1)
+            mode, kind, blob, size = metadata.split()
+            entries[name] = (mode, blob, int(size) if kind == "blob" else 0)
+        return entries
+
+    def github_source(self, entries, redact):
+        source = {}
+        total = 0
+        for name, (mode, blob, size) in entries.items():
+            if mode not in ("100644", "100755") or name.lower().endswith((".key", ".pem", ".p12")):
+                continue
+            if Path(name).name.lower() in ("credentials.json", "secrets.json"):
+                continue
+            if len(source) == 120 or total == MAX_BYTES:
+                break
+            if total + size > MAX_BYTES:
+                continue
+            try:
+                safe_path(name)
+                content = self.git(self.root, "cat-file", "blob", blob, binary=True).stdout.decode("utf-8")
+            except (ValueError, UnicodeError):
+                continue
+            if "\0" not in content and redact(content) == content:
+                source[name] = content
+                total += size
+        return source
+
+    def commit_github(self, session, original, entries, files):
+        base = session["github_base"]
+        ref = self.github_ref(session["project_id"], "laps/" + session["id"])
+        saved = self.git(self.root, "rev-parse", "--verify", ref, check=False)
+        if saved.returncode == 0:
+            return saved.stdout.strip()
+        changed = {name: content for name, content in files.items() if original.get(name) != content}
+        removed = original.keys() - files.keys()
+        if not changed and not removed:
+            return None
+        with tempfile.TemporaryDirectory(prefix="git-index-", dir=self.staging) as directory:
+            index = Path(directory) / "index"
+            self.git(self.root, "read-tree", base, index=index)
+            if removed:
+                self.git(self.root, "update-index", "--force-remove", "--", *sorted(removed), index=index)
+            for name, content in changed.items():
+                safe_path(name)
+                require(name not in entries or name in original, "Cannot replace an excluded GitHub path")
+                mode = entries[name][0] if name in entries else "100644"
+                blob = self.git(self.root, "hash-object", "-w", "--stdin", data=content.encode(), binary=True)
+                self.git(self.root, "update-index", "--add", "--cacheinfo",
+                         f"{mode},{blob.stdout.decode().strip()},{name}", index=index)
+            tree = self.git(self.root, "write-tree", index=index).stdout.strip()
+        commit = self.git(self.root, "commit-tree", tree, "-p", base, "-m",
+                          f"Pit Crew: approved lap {session['id']}").stdout.strip()
+        self.git(self.root, "update-ref", ref, commit, "0" * len(commit))
+        return commit
+
+    def advance_github(self, session, commit):
+        ref = self.github_ref(session["project_id"])
+        if self.github_head(session["project_id"]) != commit:
+            self.git(self.root, "update-ref", ref, commit, session["github_base"])
+
+    def publish_github(self, session, url):
+        branch = "pitcrew/lap-" + session["id"]
+        self.git(self.root, *GITHUB_OPTIONS, "push", "--", github_url(url),
+                 f"{session['github_commit']}:refs/heads/{branch}")
+        return branch
 
     def checkout(self, session):
         branch = session["branch"]

@@ -3,3 +3,5 @@ __pycache__/
 dist/
 .omni-data/
 .omni-smoke-*/
+.pitcrew-data/
+.pitcrew-smoke-*/

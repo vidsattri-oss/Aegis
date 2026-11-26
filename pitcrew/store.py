@@ -56,13 +56,15 @@ class Redactor:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
- id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, created TEXT NOT NULL
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, created TEXT NOT NULL,
+ github_url TEXT, github_branch TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), prompt TEXT NOT NULL,
  state TEXT NOT NULL DEFAULT 'queued', stage TEXT NOT NULL DEFAULT 'lead', branch TEXT NOT NULL,
  created TEXT NOT NULL, updated TEXT NOT NULL, plan TEXT, preview TEXT, bundle TEXT, error TEXT,
- cancellation INTEGER NOT NULL DEFAULT 0, provider TEXT NOT NULL
+ cancellation INTEGER NOT NULL DEFAULT 0, provider TEXT NOT NULL,
+ github_base TEXT, github_commit TEXT, github_published TEXT
 );
 CREATE INDEX IF NOT EXISTS sessions_project ON sessions(project_id, created);
 CREATE TABLE IF NOT EXISTS attempts (
@@ -109,6 +111,15 @@ CREATE TABLE IF NOT EXISTS memory_usage (
 CREATE TABLE IF NOT EXISTS dream_runs (
  id INTEGER PRIMARY KEY, at TEXT NOT NULL, pruned INTEGER NOT NULL, synthesized INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS agent_learning (
+ attempt_id TEXT PRIMARY KEY REFERENCES attempts(id), project_id TEXT NOT NULL REFERENCES projects(id),
+ role TEXT NOT NULL, stage TEXT NOT NULL, lesson TEXT NOT NULL, evidence TEXT NOT NULL, created TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_learning_role ON agent_learning(project_id,role,created);
+CREATE TABLE IF NOT EXISTS agent_playbooks (
+ project_id TEXT REFERENCES projects(id), role TEXT, revision INTEGER NOT NULL,
+ lessons TEXT NOT NULL, PRIMARY KEY(project_id,role)
+);
 """
 
 JSON_COLUMNS = {"provider", "plan", "profile", "input", "trace", "payload", "artifact", "details"}
@@ -133,6 +144,12 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             if "reply_to" not in {column["name"] for column in db.execute("PRAGMA table_info(messages)")}:
                 db.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER REFERENCES messages(id)")
+            for table, fields in (("projects", ("github_url", "github_branch")),
+                                  ("sessions", ("github_base", "github_commit", "github_published"))):
+                columns = {column["name"] for column in db.execute(f"PRAGMA table_info({table})")}
+                for field in fields:
+                    if field not in columns:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {field} TEXT")
             db.execute("CREATE INDEX IF NOT EXISTS messages_reply ON messages(session_id, reply_to)")
             db.execute("""INSERT INTO dream_runs(at,pruned,synthesized)
                 SELECT json_extract(value,'$.at'),json_extract(value,'$.pruned'),json_extract(value,'$.synthesized')
@@ -178,10 +195,11 @@ class Store:
             db.execute("INSERT OR IGNORE INTO settings VALUES ('workspace_id',?)", (encode(uid()),))
             return json.loads(db.execute("SELECT value FROM settings WHERE key='workspace_id'").fetchone()[0])
 
-    def project(self, name, description):
-        project_id = uid()
-        self.write("INSERT INTO projects VALUES (?,?,?,?)",
-                   (project_id, self.redact(name), self.redact(description), now()))
+    def project(self, name, description, *, project_id=None, github_url=None, github_branch=None):
+        project_id = project_id or uid()
+        self.write("""INSERT INTO projects(id,name,description,created,github_url,github_branch)
+                      VALUES (?,?,?,?,?,?)""",
+                   (project_id, self.redact(name), self.redact(description), now(), github_url, github_branch))
         return self.row("SELECT * FROM projects WHERE id=?", (project_id,))
 
     def projects(self):
@@ -248,17 +266,19 @@ class Store:
             events.append({**row, "tool": payload.get("tool"), "model": payload.get("model"), "excerpt": excerpt[:650]})
         return {"events": events, "before": events[-1]["id"] if after is None and len(scoped) > limit else None}
 
-    def release(self, session_id, commit, build, preview):
+    def release(self, session_id, commit, build, preview, github_commit=None):
         stamp = now()
-        event = encode(self.redact({"commit": commit, "build": build, "preview": preview}))
+        event = encode(self.redact({"commit": commit, "build": build, "preview": preview, "github_commit": github_commit}))
         with self.db() as db:
-            db.execute("UPDATE sessions SET state='completed',bundle=?,preview=?,updated=? WHERE id=?",
-                       (build, preview, stamp, session_id))
+            db.execute("UPDATE sessions SET state='completed',bundle=?,preview=?,github_commit=?,updated=? WHERE id=?",
+                       (build, preview, github_commit, stamp, session_id))
             db.execute("INSERT INTO events (session_id,time,kind,payload) VALUES (?,?,'released',?)",
                        (session_id, stamp, event))
+            message = "All six stages passed. The build is available in Parc Fermé."
+            if github_commit:
+                message += " The GitHub work is committed locally and ready to publish on its lap branch."
             db.execute("INSERT INTO messages (session_id,speaker,text,created) VALUES (?,'lead',?,?)",
-                       (session_id, "All six stages passed. The reviewed changes are merged and the build "
-                        "is available in Live Output.", stamp))
+                       (session_id, message, stamp))
 
     def cancel(self, session_id):
         with self.db() as db:
@@ -325,10 +345,15 @@ class Store:
         session["tokens"] = sum(a["input_tokens"] + a["output_tokens"] for a in session["agents"])
         return session
 
-    def retrieve(self, query, limit=6):
+    def retrieve(self, query, limit=6, *, project=None):
         terms = set(re.findall(r"[a-z0-9]{4,}", query.lower()))
         ranked = []
-        for node in self.rows("SELECT * FROM memory_nodes ORDER BY weight DESC, last_used DESC LIMIT 500"):
+        candidates = self.rows("""SELECT * FROM memory_nodes n WHERE
+            (? IS NOT NULL AND EXISTS (SELECT 1 FROM memory_projects m WHERE m.node_id=n.id AND m.project_id=?))
+            OR (? IS NULL AND NOT EXISTS (SELECT 1 FROM memory_projects m JOIN projects p ON p.id=m.project_id
+                                         WHERE m.node_id=n.id AND p.github_url IS NOT NULL))
+            ORDER BY weight DESC,last_used DESC LIMIT 500""", (project, project, project))
+        for node in candidates:
             text = set(re.findall(r"[a-z0-9]{4,}", (node["label"] + " " + node["body"]).lower()))
             overlap = len(terms & text)
             if overlap:
@@ -364,6 +389,26 @@ class Store:
         db.execute("""INSERT INTO memory_edges VALUES (?,?,?,1)
                       ON CONFLICT(source,target,kind) DO UPDATE SET weight=weight+1""", (source, target, kind))
 
+    def learn(self, project, attempt, role, stage, lesson, evidence):
+        self.write("""INSERT OR IGNORE INTO agent_learning
+                      (attempt_id,project_id,role,stage,lesson,evidence,created)
+                      VALUES (?,?,?,?,?,?,?)""",
+                   (attempt, project, role, stage, self.redact(lesson), self.redact(evidence), now()))
+
+    def playbook(self, project, role):
+        record = self.row("SELECT revision,lessons FROM agent_playbooks WHERE project_id=? AND role=?", (project, role))
+        trials = self.rows("""SELECT attempt_id,stage,lesson,evidence FROM agent_learning
+                              WHERE project_id=? AND role=? ORDER BY created DESC,rowid DESC LIMIT 4""", (project, role))
+        lessons = json.loads(record["lessons"]) if record else []
+        consolidated = {item["attempt_id"] for item in lessons}
+        return {"revision": record["revision"] if record else 0, "lessons": lessons,
+                "recent_trials": [trial for trial in trials if trial["attempt_id"] not in consolidated]}
+
+    def playbooks(self, project=None):
+        records = self.rows("""SELECT b.*,p.name FROM agent_playbooks b JOIN projects p ON p.id=b.project_id
+                               WHERE (? IS NULL OR b.project_id=?) ORDER BY p.name,b.role LIMIT 100""", (project, project))
+        return [{**record, "lessons": json.loads(record["lessons"])} for record in records]
+
     def dream(self, retain_days=90):
         """Consolidate recurring decisions locally while no session is executing."""
         with self.db() as db:
@@ -377,7 +422,9 @@ class Store:
             groups = defaultdict(list)
             for row in db.execute("""SELECT n.id,n.body,GROUP_CONCAT(p.project_id) AS projects
                 FROM memory_nodes n JOIN memory_projects p ON p.node_id=n.id
-                WHERE n.kind IN ('decision','pattern','fix') GROUP BY n.id ORDER BY n.weight DESC LIMIT 500"""):
+                JOIN projects owning ON owning.id=p.project_id
+                WHERE owning.github_url IS NULL AND n.kind IN ('decision','pattern','fix')
+                GROUP BY n.id ORDER BY n.weight DESC LIMIT 500"""):
                 words = re.findall(r"[a-z]{5,}", row["body"].lower())
                 for pair in set(zip(words, words[1:])):
                     groups[pair].append(row)
@@ -399,7 +446,27 @@ class Store:
             db.execute("""UPDATE memory_edges SET weight=MAX(weight, (SELECT CAST(MIN(a.weight,b.weight) AS INTEGER)
                 FROM memory_nodes a,memory_nodes b WHERE a.id=source AND b.id=target))
                 WHERE kind='resolved_by'""")
-            result = {"at": now(), "pruned": count, "synthesized": synthesized}
+            playbooks = defaultdict(list)
+            for row in db.execute("""SELECT * FROM (
+                SELECT project_id,role,attempt_id,stage,lesson,evidence,
+                       ROW_NUMBER() OVER (PARTITION BY project_id,role ORDER BY created DESC,rowid DESC) AS rank
+                FROM agent_learning)
+                WHERE rank<=12 ORDER BY project_id,role,rank"""):
+                records = playbooks[row["project_id"], row["role"]]
+                record = {key: row[key] for key in ("attempt_id", "stage", "lesson", "evidence")}
+                if len(records) < 4 and all(item["lesson"].casefold() != record["lesson"].casefold() for item in records):
+                    records.append(record)
+            revised = 0
+            for (project, role), lessons in playbooks.items():
+                old = db.execute("SELECT lessons FROM agent_playbooks WHERE project_id=? AND role=?", (project, role)).fetchone()
+                if old and [(item["stage"], item["lesson"]) for item in json.loads(old["lessons"])] == [
+                    (item["stage"], item["lesson"]) for item in lessons
+                ]:
+                    continue
+                revised += db.execute("""INSERT INTO agent_playbooks VALUES (?,?,1,?)
+                    ON CONFLICT(project_id,role) DO UPDATE SET revision=agent_playbooks.revision+1,lessons=excluded.lessons
+                    WHERE agent_playbooks.lessons<>excluded.lessons""", (project, role, encode(lessons))).rowcount
+            result = {"at": now(), "pruned": count, "synthesized": synthesized, "playbooks_revised": revised}
             db.execute("INSERT INTO dream_runs(at,pruned,synthesized) VALUES (?,?,?)", (result["at"], count, synthesized))
             db.execute("INSERT INTO settings VALUES ('last_dream',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                        (encode(result),))
@@ -408,6 +475,7 @@ class Store:
     def memory_health(self):
         nodes = self.rows("SELECT kind,COUNT(*) AS count FROM memory_nodes GROUP BY kind")
         return {"nodes": sum(n["count"] for n in nodes), "kinds": dict((n["kind"], n["count"]) for n in nodes),
+                "agent_playbooks": self.row("SELECT COUNT(*) AS count FROM agent_playbooks")["count"],
                 "links": self.row("SELECT COUNT(*) AS count FROM memory_edges")["count"],
                 "applications": self.row("SELECT COUNT(*) AS count FROM memory_usage")["count"],
                 "last_dream": self.setting("last_dream")}

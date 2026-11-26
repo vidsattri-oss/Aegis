@@ -14,19 +14,21 @@ from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from .engine import Lead
+from .config import default_workspace
 from .contracts import PERSONAS, STAGES, require
+from .engine import Lead
 from .sandbox import detected_capacity
 
-WEB = files("omni").joinpath("web")
+WEB = files("pitcrew").joinpath("web")
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           "/workspace-tools.js": ("workspace-tools.js", "text/javascript; charset=utf-8"),
           "/session.js": ("session.js", "text/javascript; charset=utf-8"),
           "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+          "/pitcrew-mark.png": ("pitcrew-mark.png", "image/png"),
           "/agent-portraits.png": ("agent-portraits.png", "image/png")}
 PROJECT = re.compile(r"/api/projects/([0-9a-f]{16})/sessions\Z")
-SESSION = re.compile(r"/api/sessions/([0-9a-f]{16})(?:/(agents|telemetry|messages|build|preview|cancel|retry))?"
+SESSION = re.compile(r"/api/sessions/([0-9a-f]{16})(?:/(agents|telemetry|messages|build|preview|cancel|retry|publish))?"
                      r"(?:/([0-9a-f]{16}))?\Z")
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
@@ -103,7 +105,8 @@ class Handler(BaseHTTPRequestHandler):
                 origin = self.headers.get("Origin")
                 if origin and origin != "http://" + self.headers["Host"]:
                     raise HTTPFailure(403, "Cross-origin requests are disabled")
-                if not secrets.compare_digest(self.headers.get("X-Omni-Token", ""), self.server.csrf):
+                token = self.headers.get("X-Pitcrew-Token", self.headers.get("X-Omni-Token", ""))
+                if not secrets.compare_digest(token, self.server.csrf):
                     raise HTTPFailure(403, "Missing workspace request token")
             location = urlsplit(self.path)
             if self.command == "POST":
@@ -129,7 +132,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, (WEB / name).read_bytes(), mime)
         elif path == "/api/workspace":
             self.json({"csrf": self.server.csrf, "workspace_id": lead.workspace, "projects": store.projects(),
-                       "provider": lead.provider(), "memory": store.memory_health()})
+                       "provider": lead.provider(), "memory": store.memory_health(),
+                       "capabilities": {"github_racedays": True}})
         elif path == "/api/extensions":
             self.json(lead.extensions())
         elif path == "/api/extensions/config":
@@ -150,6 +154,10 @@ class Handler(BaseHTTPRequestHandler):
             search = query.get("q", [""])[0]
             require(0 <= page <= 100_000 and len(search) <= 200, "Invalid Dreaming query")
             self.json(store.dream_history(page) if path.endswith("/history") else store.memory_browser(search, page))
+        elif path == "/api/memory/playbooks":
+            project = query.get("project", [None])[0]
+            require(project is None or re.fullmatch(r"[0-9a-f]{16}", project), "Invalid RaceDay ID")
+            self.json({"playbooks": store.playbooks(project)})
         elif path == "/api/execution":
             self.json(lead.execution_settings())
         elif path == "/api/execution/pressure":
@@ -163,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
         elif match := PROJECT.fullmatch(path):
             project = store.row("SELECT * FROM projects WHERE id=?", (match[1],))
             if not project:
-                raise HTTPFailure(404, "Project does not exist")
+                raise HTTPFailure(404, "RaceDay does not exist")
             self.json({"project": project, "sessions": store.rows(
                 """SELECT id,prompt,state,stage,branch,created,updated,error FROM sessions
                    WHERE project_id=? ORDER BY created DESC""", (match[1],))})
@@ -184,11 +192,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise HTTPFailure(404, "Build is not available")
                 bundle = lead.repo.bundles / f"{session_id}.zip"
                 self.send(200, bundle.read_bytes(), "application/zip",
-                          {"Content-Disposition": f'attachment; filename="rittaiharness-{session_id}.zip"'})
+                          {"Content-Disposition": f'attachment; filename="pitcrew-{session_id}.zip"'})
             elif not action:
                 session = store.summary(session_id)
                 if not session:
-                    raise HTTPFailure(404, "Session does not exist")
+                    raise HTTPFailure(404, "Lap does not exist")
                 self.json(session)
             else:
                 raise HTTPFailure(404, "Unknown workspace endpoint")
@@ -235,10 +243,8 @@ class Handler(BaseHTTPRequestHandler):
     def change(self, path, data):
         lead, store = self.server.lead, self.server.lead.store
         if path == "/api/projects":
-            name, description = data.get("name"), data.get("description", "")
-            require(isinstance(name, str) and 0 < len(name.strip()) <= 100, "Enter a project name up to 100 characters")
-            require(isinstance(description, str) and len(description) <= 1000, "Description is too long")
-            self.json(store.project(name.strip(), description.strip()), 201)
+            self.json(lead.create_project(data.get("name"), data.get("description", ""),
+                                          data.get("github_url"), data.get("github_branch")), 201)
         elif path == "/api/provider":
             self.json(lead.configure(data))
         elif path == "/api/provider/models":
@@ -286,6 +292,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.json({"queued": True}, 202)
             elif action == "preview":
                 self.json({"url": lead.change_preview(session_id, data.get("start") is True)})
+            elif action == "publish":
+                self.json(lead.publish(session_id))
             else:
                 raise HTTPFailure(404, "Unknown workspace endpoint")
         else:
@@ -300,14 +308,14 @@ def workspace_lock(directory):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise SystemExit("This RittaiHarness workspace is already open") from exc
+            raise SystemExit("This Pit Crew Harness workspace is already open") from exc
         yield
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--data", type=Path, default=Path(os.environ.get("OMNI_DATA", ".omni-data")))
+    parser.add_argument("--data", type=Path, default=default_workspace())
     parser.add_argument("--doctor", action="store_true", help="Check Docker daemon and built images")
     args = parser.parse_args(argv)
     if args.doctor:
@@ -316,7 +324,7 @@ def main(argv=None):
             Docker().doctor()
         except (OSError, RuntimeError, TimeoutError) as exc:
             parser.exit(1, f"{exc}\n")
-        print("Docker and RittaiHarness images are ready.")
+        print("Docker and Pit Crew Harness images are ready.")
         return
     if not 0 <= args.port <= 65535:
         parser.error("Port must be between 0 and 65535")
@@ -332,7 +340,7 @@ def main(argv=None):
                 pending = marker.with_suffix(".tmp")
                 pending.write_text(str(server.server_port), encoding="ascii")
                 pending.replace(marker)
-                print("RittaiHarness workspace is available at " + server.base_url, flush=True)
+                print("Pit Crew Harness workspace is available at " + server.base_url, flush=True)
                 try:
                     server.serve_forever()
                 except KeyboardInterrupt:
