@@ -118,8 +118,12 @@ class PitWallAPITest(unittest.TestCase):
             self.assertEqual(self.command("models")[0].strip(), "fixture")
         self.assertIn("removed", self.command("credential", "forget")[0])
         policy = self.data / "limits.json"
-        policy.write_text(json.dumps({"sessions": 2, "parallel_reviews": True}), encoding="utf-8")
-        self.assertIn("Concurrent laps  2", self.command("pit-setup", "--apply", str(policy))[0])
+        policy.write_text(json.dumps({"sessions": 2, "parallel_reviews": True, "adaptive_sessions": True,
+                                      "deep_research": True}), encoding="utf-8")
+        setup, _ = self.command("pit-setup", "--apply", str(policy))
+        self.assertIn("Concurrent laps  2", setup)
+        self.assertIn("Adaptive concurrency  On", setup)
+        self.assertIn("Autoresearch Beast Mode  On", setup)
         self.assertIn("reserved", json.loads(self.command("pit-setup", "--pressure")[0]))
         self.assertIn("Docker", self.command("doctor", "--full", "--local-only")[0])
         self.assertEqual(self.request("/api/doctor")[0], 200)

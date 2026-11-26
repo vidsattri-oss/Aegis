@@ -230,6 +230,10 @@ The table shows reference sizes for an engine with 8 CPU cores and 4 GiB of RAM.
 
 Up to three sessions from different projects can run by default. The workspace setting supports one to eight. Work in the same project queues behind its current session to preserve the approved source history. Enable **Run two independent reviewers per gate** to check acceptance criteria and execution evidence concurrently. Both reviewers must approve before advancement. Resource limits and review settings apply when a session starts or retries.
 
+Enable **Adapt concurrent laps to Docker capacity** to use the configured lap count as a ceiling. The scheduler estimates how many laps can fit their heaviest stage, accounting for live previews and other containers. It adds at most one slot per sample and reduces admission as soon as pressure rises. Missing or stale Docker measurements limit admission to one lap. Each stage still reserves its actual resources before launching. The corresponding CLI setting is `adaptive_sessions`.
+
+**Maximum simultaneous model requests** (`model_slots`) limits model calls across running Laps and Team Radio. It defaults to three and is configurable from one to eight. Set it to fit your model provider’s capacity independently of Docker settings.
+
 Pit Crew Harness reads the Docker engine’s allocation again when a session starts or retries. The logs record which sizes the session received. The workspace keeps up to 512 MiB for the engine and queues work against the remaining budget. Its reservations include live previews and overlapping role, build, browser QA, and MCP containers. It also samples CPU and memory used by other containers on the same engine, including other workspaces. **Pit Setup → Live Docker pressure** shows the sample and the sessions holding reservations here. Docker usage samples estimate shared load at a point in time. A task that cannot fit by itself reports the resource shortfall. [Docker stats](https://docs.docker.com/reference/cli/docker/container/stats/)
 
 ```sh
@@ -285,6 +289,10 @@ Pit Wall shows local RaceDays, model and compute estimates, crew counts, and bui
 The Lead can add up to two specialists to its plan, each with a name, persona focus, and assignment. Their bounded advisory work runs concurrently when detected Docker capacity allows. Each sees the other assignments to reduce duplicated findings, and their reports return in plan order for the crew. The plan and the reports go through independent review. Open **Telemetry** to inspect a specialist’s persona, input, and container lifecycle. Retries carry the failure evidence forward and ask the agent to change the failed approach.
 
 Each role receives its own RaceDay playbook. An agent can propose a technique for future laps and cite evidence from validation. Pit Crew records lessons after the gate passes, including successful recoveries after failed attempts. **Setup Book → Consolidate notes** groups recent verified lessons into versioned playbooks between laps. Later attempts receive those playbooks as evidence while the user’s brief and the approval checks continue to define success. This applies Anthropic’s evaluate-and-iterate pattern to agent guidance. [When AI builds itself](https://www.anthropic.com/institute/recursive-self-improvement)
+
+**Autoresearch Beast Mode** in Pit Setup (`deep_research` in the CLI settings) uses the approved acceptance criteria to guide up to six evidence rounds per attempt. Pit Crew retains support backed by exact excerpts from fetched official sources, targets gaps in subsequent rounds, and records progress in Telemetry. The research handoff names the remaining gaps for independent review. The loop stops when coverage is complete, when two rounds add no evidence after a source is verified, or when it reaches the existing stage deadline or round limit. [Autoresearch program](https://github.com/karpathy/autoresearch/blob/master/program.md)
+
+If an application fails its sandbox QA checks after passing the build gate, the Lead gives Development one repair round with the failing candidate and diagnostics. It checkpoints the request in Git, has the amended build independently reviewed, and reruns the same QA plan before release. Transport errors and timeouts follow the normal stage retry path.
 
 ## Runtime and data
 

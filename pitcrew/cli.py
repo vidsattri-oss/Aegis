@@ -683,6 +683,12 @@ def run_action(args, backend):
             else:
                 print("Docker unavailable. Showing reference sizes.")
             print(f"Concurrent laps  {policy['sessions']}")
+            if policy.get("adaptive_sessions"):
+                print(f"Adaptive concurrency  On · local limit {policy.get('effective_sessions', 'resolved by Pit Wall')}")
+            if policy.get("deep_research"):
+                print("Autoresearch Beast Mode  On · up to six evidence rounds per attempt")
+            if "model_slots" in policy:
+                print(f"Maximum simultaneous model requests  {policy['model_slots']}")
             print("Independent reviewers per gate  " + ("2" if policy["parallel_reviews"] else "1"))
             for task, limits in policy["limits"].items():
                 sizing = "custom" if task in policy["overrides"] else "auto"

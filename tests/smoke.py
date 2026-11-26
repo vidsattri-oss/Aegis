@@ -13,11 +13,20 @@ from pitcrew.engine import Lead, TERMINAL
 from pitcrew.sandbox import Docker
 
 
+class RepairSmokeLead(Lead):
+    def ask_model(self, session, role, data, agent, until, sample, *, instruction=None):
+        draft = super().ask_model(session, role, data, agent, until, sample, instruction=instruction)
+        if role == "development" and "repair" not in data:
+            path = "index.html"
+            draft["files"][path] = draft["files"][path].replace(demo.TITLE, "Wrong title for QA", 1)
+        return draft
+
+
 def main():
     Docker().doctor()
     # Docker Desktop only shares configured host paths with its VM.
     with tempfile.TemporaryDirectory(prefix=".pitcrew-smoke-", dir=Path.cwd()) as scratch:
-        lead = Lead(Path(scratch))
+        lead = RepairSmokeLead(Path(scratch))
         try:
             project = lead.store.project("Real Docker smoke test", "")
             demo.EXAMPLES["lead"]["specialists"] = [
@@ -37,6 +46,8 @@ def main():
                 raise AssertionError(f"{session['stage']} ended with {session['state']}: {session['error']}")
             summary = lead.store.summary(sid)
             assert len(summary["gates"]) == 7
+            assert len([agent for agent in summary["agents"] if agent["role"] == "development"]) == 2
+            assert lead.store.row("SELECT id FROM events WHERE session_id=? AND kind='repair_requested'", (sid,))
             specialists = [agent for agent in summary["agents"] if agent["role"] == "specialist"]
             assert len(specialists) == 2 and all(agent["status"] == "Success" for agent in specialists)
             assert lead.dream()["playbooks_revised"] == 9
@@ -46,7 +57,7 @@ def main():
                 assert b"data:image/webp;base64," in response.read()
             with ZipFile(session["bundle"]) as archive:
                 assert archive.testzip() is None and set(demo.FILES) <= set(archive.namelist())
-            print("Lead plan, two specialists, all six stage gates, crew playbooks, live preview, and build ZIP passed.")
+            print("Lead plan, two specialists, QA repair, all six stage gates, crew playbooks, preview, and build ZIP passed.")
         finally:
             lead.close()
 

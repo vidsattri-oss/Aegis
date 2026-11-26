@@ -538,6 +538,14 @@ async function executionSettings(event) {
       localPreflight(), livePressure(),
       field("Concurrent laps across RaceDays", node("input", { name: "sessions", type: "number", required: true,
         min: 1, max: 8, value: policy.sessions })),
+      Object.hasOwn(policy, "adaptive_sessions") && node("label", { class: "checkbox" },
+        node("input", { name: "adaptive_sessions", type: "checkbox", checked: policy.adaptive_sessions }),
+        ` Adapt concurrent laps to Docker capacity · current limit ${policy.effective_sessions}`),
+      Object.hasOwn(policy, "deep_research") && node("label", { class: "checkbox" },
+        node("input", { name: "deep_research", type: "checkbox", checked: policy.deep_research }),
+        " Autoresearch Beast Mode · up to six evidence rounds per attempt"),
+      Object.hasOwn(policy, "model_slots") && field("Maximum simultaneous model requests", node("input",
+        { name: "model_slots", type: "number", required: true, min: 1, max: 8, value: policy.model_slots })),
       node("label", { class: "checkbox" }, node("input", { name: "parallel_reviews", type: "checkbox", checked: policy.parallel_reviews }),
         " Run two independent reviewers per gate"),
       muted("Both reviewers must approve before the next stage starts."),
@@ -548,7 +556,12 @@ async function executionSettings(event) {
         .map(({ task, limits, previous, wasCustom, fields }) => [task, Object.fromEntries(fields
           .filter(([key, input]) => !wasCustom || key in previous || Number(input.value) !== limits[key])
           .map(([key, input]) => [key, Number(input.value)]))]));
-      await api("/api/execution", { sessions: Number(data.sessions), parallel_reviews: Boolean(data.parallel_reviews), overrides });
+      const settings = { sessions: Number(data.sessions), parallel_reviews: Boolean(data.parallel_reviews), overrides };
+      for (const option of ["adaptive_sessions", "deep_research"]) {
+        if (Object.hasOwn(policy, option)) settings[option] = Boolean(data[option]);
+      }
+      if (Object.hasOwn(policy, "model_slots")) settings.model_slots = Number(data.model_slots);
+      await api("/api/execution", settings);
       notify("Pit setup saved.");
     }, true);
   }, event);

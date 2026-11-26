@@ -34,17 +34,27 @@ PREVIEW_CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src
 DOCKER_TIMEOUT = 12
 
 
+class ExecutionFailed(RuntimeError):
+    """A deliverable started but failed its checks in the runtime."""
+
+
 def execution_policy(data=None):
     if data is None:
         data = {}
-    require(isinstance(data, dict) and set(data) <= {"sessions", "parallel_reviews", "overrides", "limits", "capacity"},
+    require(isinstance(data, dict) and set(data) <= {"sessions", "parallel_reviews", "adaptive_sessions", "deep_research", "model_slots",
+                                                    "overrides", "limits", "capacity", "effective_sessions"},
             "Invalid execution settings")
     sessions = data.get("sessions", 3)
     reviews = data.get("parallel_reviews", False)
+    adaptive = data.get("adaptive_sessions", False)
+    deep_research = data.get("deep_research", False)
+    model_slots = data.get("model_slots", 3)
     legacy = "overrides" not in data
     overrides = data.get("limits" if legacy else "overrides", {})
     require(type(sessions) is int and 1 <= sessions <= MAX_SESSIONS, f"Concurrent sessions must be between 1 and {MAX_SESSIONS}")
     require(isinstance(reviews, bool), "Parallel reviews must be enabled or disabled")
+    require(isinstance(adaptive, bool) and isinstance(deep_research, bool), "Use boolean execution switches")
+    require(type(model_slots) is int and 1 <= model_slots <= MAX_SESSIONS, "Parallel model requests must be between 1 and 8")
     require(isinstance(overrides, dict) and set(overrides) <= TASK_PROFILES.keys(), "Unknown container task")
     custom = {}
     for task, override in overrides.items():
@@ -59,7 +69,8 @@ def execution_policy(data=None):
         changed = {key: value for key, value in override.items() if not legacy or value != defaults[key]}
         if changed:
             custom[task] = changed
-    return {"sessions": sessions, "parallel_reviews": reviews, "overrides": custom}
+    return {"sessions": sessions, "parallel_reviews": reviews, "adaptive_sessions": adaptive,
+            "deep_research": deep_research, "model_slots": model_slots, "overrides": custom}
 
 
 def execution_plan(policy, capacity):
@@ -75,6 +86,23 @@ def execution_plan(policy, capacity):
             ram = max(min_ram, round(ram * min(2, capacity["ram"] / 4096) / 32) * 32)
         limits[task] = {"cpu": cpu, "ram": ram, "pids": pids, **policy["overrides"].get(task, {})}
     return {**policy, "capacity": capacity, "limits": limits}
+
+
+def adaptive_lap_limit(plan, pressure):
+    if not plan["adaptive_sessions"]:
+        return plan["sessions"]
+    if not plan["capacity"] or pressure["external"] is None:
+        return 1
+    limits = plan["limits"]
+    peaks = [("development", "build"), ("qa", "qa_browser"), ("deploy", "release"),
+             ("specialist", "specialist"), ("review",) * (2 if plan["parallel_reviews"] else 1)]
+    previews = [hold for hold in pressure["holds"] if "preview" in hold["tasks"]]
+    slots = []
+    for resource in ("cpu", "ram"):
+        peak = max(sum(limits[task][resource] for task in pair) for pair in peaks)
+        available = pressure["budget"][resource] - pressure["external"][resource] - sum(hold[resource] for hold in previews)
+        slots.append(math.floor(available / peak))
+    return max(1, min(plan["sessions"], *slots))
 
 
 def detected_capacity(docker):
@@ -368,8 +396,9 @@ class Docker:
                     tail.extend(chunk[:max(0, LOG_LIMIT - len(tail))])
                     require(total <= LOG_LIMIT, "Container log exceeded its hard output limit")
                 if process.wait(timeout=max(0.1, deadline - time.monotonic())):
-                    raise RuntimeError(f"{action} failed (exit {process.returncode}): "
-                                       + tail[-1800:].decode(errors="replace").strip())
+                    error = ExecutionFailed if process.returncode == 1 else RuntimeError
+                    raise error(f"{action} failed (exit {process.returncode}): "
+                                + tail[-1800:].decode(errors="replace").strip())
             finally:
                 if tail:
                     log(tail.decode(errors="replace"))

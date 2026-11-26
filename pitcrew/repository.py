@@ -236,6 +236,14 @@ class Repository:
             self.write_json(tree / relative, payload)
             return self.commit(tree, [relative], stage, attempt, "failed")
 
+    def request_repair(self, tree, session, checkpoint, attempt):
+        with self.lock:
+            marker = self.artifact_path(session, "repair")
+            development = self.artifact_path(session, "development")
+            self.write_json(tree / marker, checkpoint)
+            (tree / development).unlink(missing_ok=True)
+            self.commit(tree, [marker, development], "qa", attempt, "repair requested")
+
     def commit(self, tree, paths, stage, attempt, outcome):
         self.git(tree, "add", "-A", "-f", "--", *paths)
         self.git(tree, "commit", "--only", "-m", f"{stage}: {outcome}",

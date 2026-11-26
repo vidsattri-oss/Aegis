@@ -48,6 +48,17 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             runtime.qa(config)
 
+    def test_node_artifact_builds_and_runs_its_own_tests(self):
+        config = self.source_files({"runtime": "node", "mode": "artifact", "entry": "app.cjs"}, {
+            "app.cjs": "exports.total = (values) => values.reduce((sum, value) => sum + value, 0);\n",
+            "app.test.cjs": "const test = require('node:test');\n"
+                            "const assert = require('node:assert/strict');\n"
+                            "const { total } = require('./app.cjs');\n"
+                            "test('totals', () => assert.equal(total([2, 3]), 5));\n",
+        })
+        runtime.qa(config)
+        self.assertIn("All execution checks passed", self.output.getvalue())
+
     def test_browser_checks_assert_page_behavior_for_a_web_build(self):
         config = self.source_files({"runtime": "static", "mode": "web"}, {
             "index.html": "<html><title>Fieldwork</title><h1>Make a plan</h1></html>",
