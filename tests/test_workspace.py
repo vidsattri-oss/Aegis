@@ -17,9 +17,15 @@ from pitcrew.contracts import PERSONAS, STAGES, manifest, validate
 from pitcrew.engine import Lead, TERMINAL
 from pitcrew.integrations import fetch_source, packages, provider_settings
 from pitcrew.repository import Repository, github_url
-from pitcrew.sandbox import ContainerCapacity, Docker, execution_plan, execution_policy, profile
+from pitcrew.sandbox import ContainerCapacity, Docker, execution_plan, execution_policy, lap_profile, profile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def release_verdict(data, verdict):
+    if data.get("release_source") and verdict["passed"]:
+        verdict["security"] = {"checks": ["Verified the release security evidence and source fixture."], "residual_risks": []}
+    return verdict
 
 
 class PreviewFixture:
@@ -110,6 +116,41 @@ class WorkspaceTest(unittest.TestCase):
             time.sleep(0.02)
         raise TimeoutError(f"Session fixture stalled in {result['stage']} ({result['state']})")
 
+    def test_lead_sizes_stay_within_operator_limits_and_use_standard_after_failure(self):
+        plan = copy.deepcopy(demo.EXAMPLES["lead"])
+        plan["crew_notes"] = {"development": "Keep the example data deterministic."}
+        plan["sandbox_sizes"] = {"build": "compact", "specialist": "compact"}
+        validate("lead", plan)
+        policy = execution_plan(execution_policy({"overrides": {"build": {"ram": 384}}}), None)
+        normal = profile("build", policy)
+        compact = lap_profile("build", policy, plan)
+        self.assertLess(compact["cpu"], normal["cpu"])
+        self.assertEqual({**compact, "cpu": normal["cpu"]}, normal)
+        self.assertEqual(lap_profile("build", policy, plan, 2), normal)
+        flags = Docker.args("runner", "workspace", "build", resources=compact)
+        self.assertIn("--network=none", flags)
+        self.assertIn("--read-only", flags)
+        with self.assertRaisesRegex(ValueError, "compact or standard"):
+            validate("lead", {**plan, "sandbox_sizes": {"preview": "compact"}})
+
+    def test_release_blocks_new_dependency_advisories_before_execution(self):
+        coordinates = [("PyPI", "sample-package", "1.0")]
+
+        def scan(dependencies, timeout):
+            self.assertEqual(dependencies, coordinates)
+            self.assertGreater(timeout, 0)
+            return [{"package": "sample-package", "version": "1.0", "id": "OSV-fixture"}]
+
+        docker = DockerFixture()
+        lead = self.lead(docker, scan=scan)
+        project = lead.create_project("Release advisory check")
+        sid = lead.store.session(project["id"], "Build", lead.provider())
+        with patch("pitcrew.engine.packages", return_value=coordinates):
+            with self.assertRaisesRegex(ValueError, "Release blocked.*OSV-fixture"):
+                lead.verify(lead.get(sid), "deploy", {}, {"development": {"files": demo.FILES}},
+                            {"id": None}, time.monotonic() + 3, True, profile("release"))
+        self.assertEqual(docker.executions, [])
+
     def test_specialists_run_concurrently_and_report_in_plan_order(self):
         lead = self.lead(DockerFixture())
         project = lead.create_project("Parallel crew")
@@ -184,6 +225,10 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(result["state"], "completed", result["error"])
         self.assertEqual([gate["stage"] for gate in result["gates"]], ["lead", *STAGES])
         self.assertTrue(all(gate["state"] == "passed" and gate["commit_sha"] for gate in result["gates"]))
+        release = result["gates"][-1]["details"]
+        self.assertEqual(release["evidence"]["security_review"]["isolation"]["network"], "none")
+        self.assertEqual(release["evidence"]["security_review"]["mode"], "practice")
+        self.assertIn("security", release["reviews"][0]["review"])
         self.assertEqual(docker.executions, ["deploy", "qa", "qa", "deploy"])
         self.assertEqual(len(docker.names), len({name for name, _ in docker.names}))
         qa = [agent for agent in result["agents"] if agent["role"] == "qa"]
@@ -244,7 +289,7 @@ class WorkspaceTest(unittest.TestCase):
                     self.assertNotIn("asset.bin", prior)
                     value["files"] = {"index.html": prior["index.html"] + "\n<!-- approved edit -->\n"}
                     value["remove"] = ["obsolete.txt"] if "obsolete.txt" in prior else []
-            return json.dumps(value), (0, 0)
+            return json.dumps(release_verdict(data, value)), (0, 0)
 
         def local_transport(cwd, *args, **options):
             return git(cwd, *(str(upstream) if arg == url else arg for arg in args), **options)
@@ -339,6 +384,10 @@ class WorkspaceTest(unittest.TestCase):
             self.assertEqual(key, "test-provider-key-value")
             stage = data["stage"]
             if "independent QA reviewer" in persona:
+                if stage == "deploy":
+                    self.assertIn("index.html", data["release_source"])
+                    report = data["evidence"]["security_review"]
+                    self.assertTrue(all(row["status"] == "fetched" for row in report["guidance"]))
                 if stage == "architecture" and not rejected:
                     rejected = True
                     value = {"passed": False, "checks": ["API"], "feedback": "Clarify the isolation boundary."}
@@ -354,7 +403,7 @@ class WorkspaceTest(unittest.TestCase):
                 if stage == "development":
                     self.assertIn("app.js", data["tool_feedback"]["result"]["syntax_checked"])
                 calls.append(stage)
-            return json.dumps(value), (13, 9)
+            return json.dumps(release_verdict(data, value)), (13, 9)
 
         lead = self.lead(DockerFixture(), model=model, scan=lambda *_: [],
                          fetch=lambda *args: {"url": args[0], "excerpt": "Verified source fixture."})
@@ -368,6 +417,7 @@ class WorkspaceTest(unittest.TestCase):
         self.assertGreater(result["tokens"], 0)
         self.assertGreater(result["cost"], 0)
         self.assertNotIn("test-provider-key-value", repr(lead.store.rows("SELECT * FROM events")))
+        self.assertEqual(result["gates"][-1]["details"]["evidence"]["security_review"]["mode"], "release")
 
     def test_cli_can_read_and_filter_a_completed_workspace(self):
         lead = self.lead(DockerFixture())

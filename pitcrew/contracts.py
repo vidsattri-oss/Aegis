@@ -5,6 +5,7 @@ from pathlib import PurePosixPath
 
 STAGES = ("research", "architecture", "design", "development", "qa", "deploy")
 LABELS = dict(zip(STAGES, ("Research", "Architecture", "UX/UI Design", "Development", "QA / UAT", "Deploy")))
+LEAD_SANDBOX_TASKS = {"specialist", "build", "qa_browser", "qa_artifact"}
 PROFILES = {
     "lead": ("worker", 0.5, 128, 48),
     "research": ("worker", 0.5, 128, 48),
@@ -122,6 +123,12 @@ def validate(role, obj):
         require(type(obj.get("passed")) is bool, "Reviewer must return a boolean verdict")
         strings(obj, "checks")
         field(obj, "feedback")
+        if "security" in obj:
+            security = obj["security"]
+            require(isinstance(security, dict) and set(security) == {"checks", "residual_risks"},
+                    "Provide security checks and residual risks")
+            strings(security, "checks", limit=8)
+            strings(security, "residual_risks", minimum=0, limit=8)
         return
     field(obj, "summary")
     if role == "lead":
@@ -135,6 +142,14 @@ def validate(role, obj):
                     "Acceptance criterion IDs must be AC1, AC2, …")
             field(item, "description")
         require(len({item["id"] for item in criteria}) == len(criteria), "Duplicate acceptance criterion")
+        sizes = obj.get("sandbox_sizes", {})
+        require(isinstance(sizes, dict) and set(sizes) <= LEAD_SANDBOX_TASKS
+                and all(size in ("compact", "standard") for size in sizes.values()),
+                "Select compact or standard for supported Lap sandbox tasks")
+        notes = obj.get("crew_notes", {})
+        require(isinstance(notes, dict) and set(notes) <= {*STAGES, "specialist"} and all(
+            isinstance(note, str) and 0 < len(note.strip()) <= 800 and not INJECT.search(note) for note in notes.values()),
+            "Crew notes must be short instructions for an existing role")
         specialists = obj.get("specialists", [])
         require(isinstance(specialists, list) and len(specialists) <= 2, "Select up to two optional specialists")
         for specialist in specialists:

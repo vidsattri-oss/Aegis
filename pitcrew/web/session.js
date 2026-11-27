@@ -370,22 +370,25 @@ function syncLeadChat(session) {
     const input = node("input", { name: "message", "aria-label": "Message the race engineer",
       placeholder: "Ask the race engineer…", required: true, maxlength: 4000 });
     const send = node("button", { type: "submit", class: "button primary" }, "Send");
+    const note = node("button", { type: "submit", class: "button quiet radio-note", title: "Send guidance to the next crew handoff" }, "Crew note");
+    const pending = node("p", { class: "muted radio-pending", role: "status", hidden: true }, "Waiting for the race engineer…");
     const draft = node("form", { class: "chat-draft", onsubmit: async (event) => {
       event.preventDefault();
       const message = input.value.trim();
       if (!message || send.disabled) return;
       send.disabled = true;
+      note.disabled = true;
       try {
-        await api("/api/sessions/" + session.id + "/messages", { text: message });
+        await api("/api/sessions/" + session.id + "/messages", { text: message, handoff: event.submitter === note });
         input.value = "";
         await refresh(true);
       } catch (error) { notify(error.message); }
-      finally { send.disabled = false; }
-    } }, input, send);
+      finally { send.disabled = false; note.disabled = false; }
+    } }, input, send, note);
     const drawer = node("section", { id: "lead-drawer", class: "lead-drawer", "aria-labelledby": "lead-title", hidden: true },
       node("header", { class: "chat-header" }, portrait("lead"), node("h2", { id: "lead-title" }, "Team Radio"),
         node("button", { type: "button", class: "close", "aria-label": "Minimize team radio",
-          onclick: () => toggle(false) }, "×")), messages, draft);
+          onclick: () => toggle(false) }, "×")), messages, pending, draft);
     const toggle = (open) => {
       drawer.hidden = !open;
       launcher.hidden = open;
@@ -402,6 +405,10 @@ function syncLeadChat(session) {
     root.replaceChildren(launcher, drawer);
   }
   const last = session.messages.at(-1)?.id || 0;
+  root.querySelector(".radio-note").hidden = !["queued", "running"].includes(session.state);
+  const answered = new Set(session.messages.map(({ reply_to }) => reply_to));
+  root.querySelector(".radio-pending").hidden = !session.messages.some(({ id, speaker, created }) =>
+    speaker === "user" && Date.now() - Date.parse(created) < 45_000 && !answered.has(id));
   if (String(last) === root.dataset.lastRendered) return;
   const messages = root.querySelector(".messages");
   const unread = root.querySelector(".chat-unread");

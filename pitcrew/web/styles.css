@@ -280,6 +280,7 @@ background:#24342f;color:var(--text);box-shadow:0 8px 22px #0005}.toast[hidden],
 .message p{white-space:pre-wrap;overflow-wrap:anywhere}
 .message small{font-size:.68rem}
 .chat-draft{display:flex;align-items:center;padding:8px;border-top:1px solid var(--line);gap:6px}
+.radio-pending{margin:0;padding:0 12px 6px;font-size:.85rem}
 .chat-draft input{min-width:0;flex:1}
 
 @media(min-width:1300px){

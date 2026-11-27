@@ -161,7 +161,8 @@ class DockerTransportTest(unittest.TestCase):
 
     def test_preview_forwards_only_local_requests_and_rewrites_redirects(self):
         docker = Docker()
-        fixture = {"status": 200, "body": "RmllbGR3b3Jr", "headers": [["Content-Type", "text/plain"]]}
+        fixture = {"status": 200, "body": "RmllbGR3b3Jr", "headers": [["Content-Type", "text/plain"],
+                                                                   ["Set-Cookie", "preview=fixture"], ["X-From-App", "fixture"]]}
         redirect = {"status": 302, "body": "", "headers": [["Location", "http://127.0.0.1:8080/board?view=tasks"],
                                                              ["X-Bad", "header\nvalue"]]}
         external = {"status": 302, "body": "", "headers": [["Location", "https://example.invalid/"]]}
@@ -182,6 +183,7 @@ class DockerTransportTest(unittest.TestCase):
                     ("GET", "/redirect", {}, 302, b""), ("GET", "/other", {}, 302, b""),
                     ("GET", "/", {"Host": "example.invalid"}, 403, None),
                     ("GET", "/", {"Origin": "https://example.invalid"}, 403, None),
+                    ("GET", "/", {"Service-Worker": "script"}, 403, None),
                     ("GET", "/missing", {}, 502, None),
                 ):
                     with self.subTest(method=method, path=path, headers=headers):
@@ -191,6 +193,10 @@ class DockerTransportTest(unittest.TestCase):
                             data = response.read()
                             if body is not None:
                                 self.assertEqual(data, body)
+                            if status == 200:
+                                self.assertEqual(response.getheader("Cross-Origin-Opener-Policy"), "same-origin")
+                                self.assertIsNone(response.getheader("Set-Cookie"))
+                                self.assertIsNone(response.getheader("X-From-App"))
                             if path == "/redirect":
                                 self.assertEqual(response.getheader("Location"), "/board?view=tasks")
                                 self.assertIsNone(response.getheader("X-Bad"))

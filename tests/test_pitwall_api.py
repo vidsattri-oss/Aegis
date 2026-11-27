@@ -61,8 +61,11 @@ class PitWallAPITest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"Pit Crew Harness", body)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+        self.assertEqual(headers["Cross-Origin-Resource-Policy"], "same-origin")
         self.assertEqual(self.request("/app.js", method="HEAD")[2], b"")
         self.assertEqual(self.request("/api/workspace", headers={"Host": "example.invalid"})[0], 403)
+        self.assertEqual(self.request("/api/workspace", headers={"Sec-Fetch-Site": "same-site"})[0], 403)
+        self.assertEqual(self.request("/api/workspace", headers={"Sec-Fetch-Site": "same-origin"})[0], 200)
         self.assertEqual(self.request("/api/projects", method="POST", data="{}")[0], 403)
         auth = {"X-Pitcrew-Token": self.remote.token}
         self.assertEqual(self.request("/api/projects", method="POST", data="{}",
@@ -140,6 +143,11 @@ class PitWallAPITest(unittest.TestCase):
         self.assertTrue(self.remote.request("/api/memory/history")["history"])
         with patch.object(lead, "dispatch_sessions"):
             sid = self.remote.run(project["id"], "Review the board", False)
+            status, _, message = self.post(f"/api/sessions/{sid}/messages", {"text": "Keep the existing labels", "handoff": True})
+            self.assertEqual(status, 202)
+            question = json.loads(message)["message_id"]
+            self.assertIn("next handoff", self.remote.chat_reply(sid, question)["text"])
+            self.assertEqual(lead.operator_notes(sid), ["Keep the existing labels"])
             self.assertEqual(self.post("/api/memory/dream", {})[0], 409)
             self.assertEqual(self.request(f"/api/sessions/{sid}/build")[0], 404)
             self.assertIn("Cancellation requested", self.command("cancel", sid)[0])

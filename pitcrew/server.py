@@ -67,6 +67,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -102,14 +103,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.headers.get("Host") not in (self.server.host_header, f"localhost:{self.server.server_port}"):
                 raise HTTPFailure(403, "Workspace requests must originate on loopback")
-            if self.command == "POST":
-                origin = self.headers.get("Origin")
-                if origin and origin != "http://" + self.headers["Host"]:
+            location = urlsplit(self.path)
+            origin = self.headers.get("Origin")
+            if self.command == "POST" or location.path.startswith("/api/"):
+                if (origin and origin != "http://" + self.headers["Host"]
+                        or self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")):
                     raise HTTPFailure(403, "Cross-origin requests are disabled")
+            if self.command == "POST":
                 token = self.headers.get("X-Pitcrew-Token", self.headers.get("X-Omni-Token", ""))
                 if not secrets.compare_digest(token, self.server.csrf):
                     raise HTTPFailure(403, "Missing workspace request token")
-            location = urlsplit(self.path)
             if self.command == "POST":
                 maximum = 1_200_000 if location.path in ("/api/extensions/config", "/api/extensions/skill") else 40_000
                 self.change(location.path, self.body(maximum))
@@ -290,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
             if agent_id:
                 raise HTTPFailure(404, "Unknown workspace endpoint")
             if action == "messages":
-                question = lead.chat(session_id, data.get("text"))
+                question = lead.chat(session_id, data.get("text"), handoff=data.get("handoff") is True)
                 self.json({"queued": True, "message_id": question}, 202)
             elif action == "cancel":
                 lead.cancel(session_id)

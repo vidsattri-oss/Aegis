@@ -147,7 +147,7 @@ class ExtensionTest(unittest.TestCase):
             else:
                 self.assertNotIn("mcp_tools", data)
                 answer = demo.EXAMPLES[stage]
-            return json.dumps(answer), (1, 1)
+            return json.dumps(test_workspace.release_verdict(data, answer)), (1, 1)
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

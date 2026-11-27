@@ -31,6 +31,7 @@ LOG_LIMIT = 1_000_000
 PREVIEW_CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
                "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; "
                "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+PREVIEW_RESPONSE_HEADERS = {"content-type", "cache-control", "location", "etag", "last-modified", "content-encoding"}
 DOCKER_TIMEOUT = 12
 
 
@@ -118,6 +119,18 @@ def profile(task, policy=None):
     return {"image": f"{IMAGE_PREFIX}-{image}:local", "task": task, **limits,
             "network": "none", "root": "read-only", "user": "10001:10001",
             "tools": [ROLE_TOOLS[task][0]] if task in ROLE_TOOLS else []}
+
+
+def lap_profile(task, policy, plan, attempt=1):
+    resources = profile(task, policy)
+    if attempt == 1 and plan.get("sandbox_sizes", {}).get(task) == "compact":
+        # Operator-pinned values take precedence over model-selected sizing.
+        pinned = policy["overrides"].get(task, {})
+        if "cpu" not in pinned:
+            resources["cpu"] = max(0.1, round(resources["cpu"] * 0.75, 2))
+        if "ram" not in pinned:
+            resources["ram"] = max(64, round(resources["ram"] * 0.75))
+    return resources
 
 
 def used_mib(display):
@@ -484,6 +497,9 @@ class Preview:
                 if origin and origin != preview.url:
                     self.send_error(403)
                     return
+                if self.headers.get("Service-Worker") == "script" or self.headers.get("Sec-Fetch-Dest") == "serviceworker":
+                    self.send_error(403)
+                    return
                 if not slots.acquire(blocking=False):
                     self.send_error(503)
                     return
@@ -508,18 +524,26 @@ class Preview:
                 try:
                     self.send_response(result["status"])
                     for key, value in result["headers"]:
-                        if any(char in value for char in ("\r", "\n")):
+                        lower = key.lower()
+                        if lower not in PREVIEW_RESPONSE_HEADERS or any(char in value for char in ("\r", "\n")):
                             continue
-                        if key.lower() == "location":
-                            location = urlsplit(value)
-                            if location.netloc == "127.0.0.1:8080":
-                                value = (location.path or "/") + ("?" + location.query if location.query else "")
-                            elif location.scheme or location.netloc or "\\" in value:
+                        if lower == "location":
+                            try:
+                                location = urlsplit(value)
+                                if location.scheme in ("", "http") and location.netloc == "127.0.0.1:8080":
+                                    value = (location.path or "/") + ("?" + location.query if location.query else "")
+                                local = urlsplit(value)
+                            except ValueError:
+                                continue
+                            if (local.scheme or local.netloc or value.startswith("//") or "\\" in value
+                                    or any(ord(char) < 32 for char in value)):
                                 continue
                         self.send_header(key, value)
                     self.send_header("Content-Security-Policy", PREVIEW_CSP)
                     self.send_header("X-Content-Type-Options", "nosniff")
                     self.send_header("Referrer-Policy", "no-referrer")
+                    self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+                    self.send_header("Cross-Origin-Resource-Policy", "same-origin")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     if self.command != "HEAD":

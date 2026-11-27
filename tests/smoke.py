@@ -35,6 +35,8 @@ def main():
                 {"name": "Accessibility specialist", "persona": "Focus on keyboard navigation.",
                  "assignment": "Identify missing accessibility scenarios."},
             ]
+            demo.EXAMPLES["lead"]["sandbox_sizes"] = {"build": "compact", "specialist": "compact"}
+            demo.EXAMPLES["lead"]["crew_notes"] = {"development": "Keep a stable heading for the QA journey."}
             sid = lead.launch(project["id"], "", sample=True)
             deadline = time.monotonic() + 600
             while time.monotonic() < deadline:
@@ -50,14 +52,18 @@ def main():
             assert lead.store.row("SELECT id FROM events WHERE session_id=? AND kind='repair_requested'", (sid,))
             specialists = [agent for agent in summary["agents"] if agent["role"] == "specialist"]
             assert len(specialists) == 2 and all(agent["status"] == "Success" for agent in specialists)
+            release = summary["gates"][-1]["details"]
+            assert release["evidence"]["security_review"]["isolation"]["network"] == "none"
+            assert release["reviews"][0]["review"]["security"]["checks"]
             assert lead.dream()["playbooks_revised"] == 9
             with urlopen(session["preview"], timeout=15) as response:
                 assert demo.TITLE.encode() in response.read()
+                assert response.headers["Cross-Origin-Opener-Policy"] == "same-origin"
             with urlopen(session["preview"] + "/panorama.css", timeout=15) as response:
                 assert b"data:image/webp;base64," in response.read()
             with ZipFile(session["bundle"]) as archive:
                 assert archive.testzip() is None and set(demo.FILES) <= set(archive.namelist())
-            print("Lead plan, two specialists, QA repair, all six stage gates, crew playbooks, preview, and build ZIP passed.")
+            print("Lead plan, compact sandboxes, specialists, QA repair, release security, isolated preview, and build ZIP passed.")
         finally:
             lead.close()
 

@@ -767,6 +767,19 @@ function outputPanel(session) {
   if (session.state !== "completed") return node("div", { class: "empty" }, node("h3", {}, "Build pending"),
     node("p", { class: "muted" }, "Parc Fermé opens after the crew clears every check."));
   const isWeb = session.gates.find((gate) => gate.stage === "architecture")?.artifact?.mode === "web";
+  const release = session.gates.find((gate) => gate.stage === "deploy");
+  const security = release?.details?.evidence?.security_review;
+  const inspections = (release?.details?.reviews || []).map(({ review }) => review.security).filter(Boolean);
+  const securityPanel = security && node("section", { class: "preview-card", "aria-label": "Release security review" },
+    node("h3", {}, "Security review"),
+    muted((security.mode === "practice" ? "Practice verdict" : "Reviewed " + timestamp(security.checked_at)) + " · " +
+      (security.dependencies.scanned ? number.format(security.dependencies.scanned) + " pinned dependencies checked" :
+        "No pinned dependencies")),
+    list(inspections.flatMap(({ checks }) => checks)),
+    inspections.some(({ residual_risks }) => residual_risks.length) && [node("h4", {}, "Residual risks"),
+      list(inspections.flatMap(({ residual_risks }) => residual_risks))],
+    ...security.guidance.map(({ url, status }) => muted(
+      (status === "fetched" ? "Guidance checked · " : status === "reference" ? "Reference · " : "Guidance unavailable · ") + url)));
   const remote = state.project?.project.github_url?.replace(/\.git$/, "");
   const publish = (event) => perform(async () => {
     const result = await api("/api/sessions/" + session.id + "/publish", {});
@@ -783,7 +796,7 @@ function outputPanel(session) {
     node("div", { class: "term-label" }, node("h3", {}, "Approved build"), termHelp("parc-ferme")),
     session.bundle && anchor("Download build", "/api/sessions/" + session.id + "/build"),
     session.bundle && node("code", { class: "output-path" }, session.bundle),
-    list(session.gates.find((gate) => gate.stage === "deploy")?.artifact?.instructions || [])];
+    list(release?.artifact?.instructions || []), securityPanel];
 }
 
 async function refresh(force = false) {
@@ -815,7 +828,7 @@ async function refresh(force = false) {
       state.session = session;
       state.signature = signature;
       renderWorkspace();
-    }
+    } else if (session) syncLeadChat(session);
   } catch (error) {
     if (!state.workspace) $("#content").replaceChildren(node("p", { class: "error-text", role: "alert" }, error.message));
     else if (force) notify(error.message);

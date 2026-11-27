@@ -170,8 +170,11 @@ class Repository:
         saved = self.git(tree, "show", f"HEAD:{path}", check=False)
         if saved.returncode:
             return None
+        record = json.loads(saved.stdout)
+        if stage == "deploy" and not record["details"]["evidence"].get("security_review"):
+            return None
         sha = self.git(tree, "log", "-1", "--format=%H", "--", path).stdout.strip()
-        return sha, json.loads(saved.stdout)
+        return sha, record
 
     @staticmethod
     def write_json(path, value):

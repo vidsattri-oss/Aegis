@@ -138,7 +138,7 @@ class RaceDayBudgetTest(unittest.TestCase):
                 draft = {"urls": [demo.SOURCE]} if data["round"] == 1 else {"done": True}
             else:
                 draft = copy.deepcopy(demo.EXAMPLES[role])
-            return json.dumps(draft), Usage((5, 2), 0.013, "vendor_charge")
+            return json.dumps(test_workspace.release_verdict(data, draft)), Usage((5, 2), 0.013, "vendor_charge")
 
         lead = self.lead(model)
         project = lead.create_project("Metered Board")["id"]
@@ -166,6 +166,51 @@ class RaceDayBudgetTest(unittest.TestCase):
         self.assertEqual(completed["state"], "completed", completed["error"])
         self.assertEqual(calls.count("lead"), 1)
         self.assertEqual(Store(self.data).budget(project)["model_cost"], round(0.013 * len(calls), 8))
+
+    def test_team_radio_gets_next_slot_without_bypassing_a_raceday_budget(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def model(_settings, _key, _persona, data, _timeout):
+            if "question" in data:
+                calls.append("radio")
+                self.assertEqual(data["state"], "running")
+                return '{"answer":"Development is running."}', Usage((1, 1), 0.01, "vendor_charge")
+            calls.append(data["stage"])
+            if data["stage"] == "development":
+                started.set()
+                self.assertTrue(release.wait(5))
+            return "{}", Usage((1, 1), 0.01, "vendor_charge")
+
+        lead = self.lead(model)
+        lead.configure_execution({"model_slots": 1})
+        project = lead.create_project("Live radio")
+        lead.budget(project["id"], 1)
+        settings = lead.provider()
+        sid = lead.store.session(project["id"], "Build", settings)
+        lead.store.update(sid, state="running", stage="development")
+        until = time.monotonic() + 8
+        with ThreadPoolExecutor(2) as workers:
+            first = workers.submit(lead.call_model, sid, settings, "", "", {"stage": "development"}, until,
+                                   attempt=self.attempt(lead, sid))
+            try:
+                self.assertTrue(started.wait(2))
+                question = lead.chat(sid, "What is running?")
+                deadline = time.monotonic() + 2
+                while lead.radio_waiting is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertIsNotNone(lead.radio_waiting)
+                queued = workers.submit(lead.call_model, sid, settings, "", "", {"stage": "qa"}, until,
+                                        attempt=self.attempt(lead, sid))
+            finally:
+                release.set()
+            first.result(timeout=3)
+            queued.result(timeout=3)
+        lead.chats.submit(lambda: None).result(timeout=3)
+        self.assertEqual(lead.store.chat_reply(sid, question)["text"], "Development is running.")
+        self.assertEqual(calls, ["development", "radio", "qa"])
+        self.assertEqual(lead.budget(project["id"])["vendor_cost"], 0.03)
 
     def test_parallel_requests_see_first_cost_before_admission(self):
         started = threading.Event()

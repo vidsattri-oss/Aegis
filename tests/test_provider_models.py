@@ -105,7 +105,7 @@ class ProviderModelsTest(unittest.TestCase):
                 value = {"done": bool(data["evidence"]), "urls": [] if data["evidence"] else [demo.SOURCE], "packages": []}
             else:
                 value = demo.EXAMPLES[data["stage"]]
-            return json.dumps(value), (3, 2)
+            return json.dumps(test_workspace.release_verdict(data, value)), (3, 2)
 
         models = {"value": [
             {"type": "ModelDeployment", "name": "chat-a", "capabilities": {"chatCompletion": "true"}},
