@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 STAGES = ("research", "architecture", "design", "development", "qa", "deploy")
 LABELS = dict(zip(STAGES, ("Research", "Architecture", "UX/UI Design", "Development", "QA / UAT", "Deploy")))
 LEAD_SANDBOX_TASKS = {"specialist", "build", "qa_browser", "qa_artifact"}
+SPECIALIST_STAGES = STAGES[:-1]
 PROFILES = {
     "lead": ("worker", 0.5, 128, 48),
     "research": ("worker", 0.5, 128, 48),
@@ -35,7 +36,10 @@ GUARD = (
     "Return one JSON object and no prose outside it."
 )
 CONTRACTS = {
-    "lead": '{"summary":"...", "stages":{"research":"...","architecture":"...","design":"...","development":"...","qa":"...","deploy":"..."}, "criteria":[{"id":"AC1","description":"..."}], "specialists":[{"name":"...","persona":"...","assignment":"..."}]}',
+    "lead": ('{"summary":"...", "stages":{"research":"...","architecture":"...","design":"...","development":"...",'
+             '"qa":"...","deploy":"..."}, "criteria":[{"id":"AC1","description":"..."}], '
+             '"specialists":[{"name":"...","persona":"...","assignment":"...","stage":"qa","criterion":"AC1",'
+             '"paths":["app.js"],"deliverable":"..."}]}'),
     "research": '{"summary":"...", "findings":["..."], "sources":["exact verified URLs"], "decisions":["..."]}',
     "architecture": '{"summary":"...", "runtime":"static|python|node","mode":"web|artifact", "components":["..."], "dataModel":"...", "api":"...", "boundaries":"...", "decisions":["..."]}',
     "design": '{"summary":"...", "flows":["..."], "wireframes":["..."], "components":["..."], "accessibility":["..."], "decisions":["..."]}',
@@ -152,12 +156,27 @@ def validate(role, obj):
             "Crew notes must be short instructions for an existing role")
         specialists = obj.get("specialists", [])
         require(isinstance(specialists, list) and len(specialists) <= 2, "Select up to two optional specialists")
+        identities, assignments = set(), set()
         for specialist in specialists:
-            require(isinstance(specialist, dict) and set(specialist) == {"name", "persona", "assignment"},
-                    "Provide the specialist name, persona, and assignment")
+            base = {"name", "persona", "assignment"}
+            require(isinstance(specialist, dict) and set(specialist) in (
+                base, base | {"stage", "criterion", "paths", "deliverable"}),
+                "Provide a specialist assignment with a stage, criterion, source paths, and deliverable")
             for key, limit in (("name", 80), ("persona", 400), ("assignment", 800)):
                 value = field(specialist, key)
                 require(len(value) <= limit and not INJECT.search(value), "Invalid specialist details")
+            if "stage" in specialist:
+                require(specialist["stage"] in SPECIALIST_STAGES and
+                        any(item["id"] == specialist["criterion"] for item in criteria), "Unknown specialist stage or criterion")
+                paths = strings(specialist, "paths", minimum=0, limit=3)
+                require(len({safe_path(path) for path in paths}) == len(paths), "Duplicate specialist source path")
+                deliverable = field(specialist, "deliverable")
+                require(len(deliverable) <= 400 and not INJECT.search(deliverable), "Invalid specialist deliverable")
+            name = " ".join(specialist["name"].casefold().split())
+            task = (specialist.get("stage"), " ".join(specialist["assignment"].casefold().split()))
+            require(name not in identities and task not in assignments, "Specialists need distinct names and assignments")
+            identities.add(name)
+            assignments.add(task)
     elif role == "research":
         for name in ("findings", "decisions"):
             strings(obj, name)
@@ -209,3 +228,10 @@ def validate(role, obj):
     elif role == "specialist":
         strings(obj, "findings", limit=5)
         strings(obj, "recommendations", limit=5)
+        if "evidence" in obj:
+            evidence = obj["evidence"]
+            require(isinstance(evidence, list) and len(evidence) <= 3, "Provide up to three source citations")
+            for citation in evidence:
+                require(isinstance(citation, dict) and set(citation) == {"path", "quote"}, "Cite a path and an exact quote")
+                safe_path(citation["path"])
+                require(12 <= len(field(citation, "quote").strip()) <= 300, "Provide an exact source quote of 12–300 characters")

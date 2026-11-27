@@ -31,9 +31,11 @@ def main():
             project = lead.store.project("Real Docker smoke test", "")
             demo.EXAMPLES["lead"]["specialists"] = [
                 {"name": "Acceptance specialist", "persona": "Focus on observable user outcomes.",
-                 "assignment": "Review the build plan and suggest acceptance checks."},
+                 "assignment": "Review the board and suggest acceptance checks.", "stage": "architecture",
+                 "criterion": "AC1", "paths": [], "deliverable": "One testable board state invariant."},
                 {"name": "Accessibility specialist", "persona": "Focus on keyboard navigation.",
-                 "assignment": "Identify missing accessibility scenarios."},
+                 "assignment": "Identify missing accessibility scenarios.", "stage": "architecture",
+                 "criterion": "AC2", "paths": [], "deliverable": "One keyboard interaction to preserve."},
             ]
             demo.EXAMPLES["lead"]["sandbox_sizes"] = {"build": "compact", "specialist": "compact"}
             demo.EXAMPLES["lead"]["crew_notes"] = {"development": "Keep a stable heading for the QA journey."}
@@ -52,6 +54,9 @@ def main():
             assert lead.store.row("SELECT id FROM events WHERE session_id=? AND kind='repair_requested'", (sid,))
             specialists = [agent for agent in summary["agents"] if agent["role"] == "specialist"]
             assert len(specialists) == 2 and all(agent["status"] == "Success" for agent in specialists)
+            assert all(agent["stage"] == "architecture" and agent["profile"]["network"] == "none" for agent in specialists)
+            architecture = next(gate for gate in summary["gates"] if gate["stage"] == "architecture")
+            assert [item["criterion"] for item in architecture["details"]["specialists"]] == ["AC1", "AC2"]
             release = summary["gates"][-1]["details"]
             assert release["evidence"]["security_review"]["isolation"]["network"] == "none"
             assert release["reviews"][0]["review"]["security"]["checks"]

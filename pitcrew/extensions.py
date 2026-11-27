@@ -201,10 +201,10 @@ class Extensions:
             for variable in server["env"]:
                 self.redact.add(os.environ.get(variable))
 
-    def guidance(self, role):
+    def guidance(self, *roles):
         blocks = []
         for skill in self.skills:
-            if role in skill["roles"]:
+            if any(role in skill["roles"] for role in roles):
                 references = "\n\n".join(f"Resource {path}\n{text}" for path, text in skill["resources"].items())
                 blocks.append(f"Skill {skill['name']}\n{skill['text']}\n{references}".rstrip())
         return self.redact("\n\n".join(blocks))

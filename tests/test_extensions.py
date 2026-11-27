@@ -124,12 +124,22 @@ class ExtensionTest(unittest.TestCase):
     def test_skill_resources_and_mcp_calls_are_scoped_during_a_factory_run(self):
         requested = False
         seen = []
+        specialist_seen = []
 
         def model(settings, key, persona, data, timeout):
             nonlocal requested
             stage = data["stage"]
-            if "independent QA reviewer" in persona:
+            if "read-only software delivery specialist" in persona:
                 self.assertIn("Fixture lean guidance", persona)
+                self.assertIn("Fixture checklist resource", persona)
+                self.assertIn("Fixture development-only rule", persona)
+                self.assertNotIn("mcp_tools", data)
+                specialist_seen.append(stage)
+                answer = {"summary": "Check the navigation", "findings": ["Use keyboard navigation"],
+                          "recommendations": ["Keep focus visible"]}
+            elif "independent QA reviewer" in persona:
+                self.assertIn("Fixture lean guidance", persona)
+                self.assertEqual("Fixture development-only rule" in persona, stage == "development")
                 answer = {"passed": True, "checks": ["Reviewed"], "feedback": "Accepted"}
             elif stage == "research" and "Propose the next high-value evidence" in persona:
                 self.assertNotIn("Fixture lean guidance", persona)
@@ -147,6 +157,10 @@ class ExtensionTest(unittest.TestCase):
             else:
                 self.assertNotIn("mcp_tools", data)
                 answer = demo.EXAMPLES[stage]
+                if stage == "lead":
+                    answer = {**answer, "specialists": [{"name": "Accessibility", "persona": "Keyboard focus",
+                              "assignment": "Identify a focus check", "criterion": "AC1", "stage": "development",
+                              "paths": [], "deliverable": "An actionable focus requirement"}]}
             return json.dumps(test_workspace.release_verdict(data, answer)), (1, 1)
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -155,12 +169,19 @@ class ExtensionTest(unittest.TestCase):
             skill.mkdir()
             (skill / "SKILL.md").write_text("---\nname: lean\ndescription: Review code\n---\nFixture lean guidance\n")
             (skill / "check.md").write_text("Fixture checklist resource\n")
+            development_skill = root / "build-guidance"
+            development_skill.mkdir()
+            (development_skill / "SKILL.md").write_text("---\nname: build-guidance\ndescription: Build policies\n---\nFixture development-only rule\n")
             (root / "server.py").write_text(STDIO_SERVER)
             config = root / "extensions.toml"
             config.write_text(f'''[[skills]]
 path = "lean"
 roles = ["development", "review"]
 resources = ["check.md"]
+
+[[skills]]
+path = "build-guidance"
+roles = ["development"]
 
 [[mcp]]
 name = "fixture"
@@ -188,6 +209,10 @@ edit_docs = ["development"]
                     result = test_workspace.WorkspaceTest.completed(lead, sid)
                     self.assertEqual(result["state"], "completed", result["error"])
                     self.assertEqual(seen, ["Verified local tool fixture."])
+                    self.assertEqual(specialist_seen, ["development"])
+                    specialist = next(agent for agent in result["agents"] if agent["role"] == "specialist")
+                    self.assertEqual(specialist["profile"]["skills"], ["lean", "build-guidance"])
+                    self.assertEqual(specialist["profile"]["mcp_tools"], [])
                     logs = lead.store.telemetry(sid, stage="development", role="development")["events"]
                     self.assertTrue(any(log["tool"] == "mcp.fixture.search_docs" for log in logs))
                 finally:

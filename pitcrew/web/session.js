@@ -13,7 +13,8 @@ const eventNames = {
   exception: "Exception", gate_passed: "Gate passed", gate_failed: "Gate failed", review_committed: "Review committed",
   capacity_wait: "Waiting for Docker capacity", execution_plan: "Docker task sizes",
   released: "Released", preview_stopped: "Preview stopped", cancelled: "Cancelled", interrupted: "Interrupted",
-  delegated: "Specialist assigned", github_base: "GitHub base", github_published: "GitHub branch published",
+  delegated: "Specialist assigned", specialist_delivered: "Specialist reported", specialist_skipped: "Specialist unavailable",
+  github_base: "GitHub base", github_published: "GitHub branch published",
 };
 const toolNames = {
   "model.chat": "Model", "docker.execute": "Docker", "research.fetch": "Research fetch",

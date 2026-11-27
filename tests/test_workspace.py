@@ -14,7 +14,7 @@ from zipfile import ZipFile
 
 from pitcrew import demo
 from pitcrew.contracts import PERSONAS, STAGES, manifest, validate
-from pitcrew.engine import Lead, TERMINAL
+from pitcrew.engine import Lead, TERMINAL, model_for_role, with_model_pool
 from pitcrew.integrations import fetch_source, packages, provider_settings
 from pitcrew.repository import Repository, github_url
 from pitcrew.sandbox import ContainerCapacity, Docker, execution_plan, execution_policy, lap_profile, profile
@@ -193,7 +193,7 @@ class WorkspaceTest(unittest.TestCase):
         events = lead.store.rows("SELECT payload FROM events WHERE session_id=? AND kind='delegated'", (sid,))
         self.assertEqual({event["payload"]["parent"] for event in events}, {"lead-attempt"})
 
-    def test_failed_specialist_round_joins_other_worker_before_retry(self):
+    def test_failed_specialist_round_keeps_other_worker_report(self):
         lead = self.lead(DockerFixture())
         project = lead.create_project("Specialist recovery")
         sid = lead.store.session(project["id"], "Review the board", provider_settings({"kind": "demo"}))
@@ -212,9 +212,59 @@ class WorkspaceTest(unittest.TestCase):
             return {"name": "Second"}
 
         with patch.object(lead, "run_specialist", side_effect=specialist):
-            with self.assertRaisesRegex(ValueError, "First assessment failed"):
-                lead.delegate(session, plan, {}, 1, time.monotonic() + 12, True, "lead-attempt")
+            self.assertEqual(lead.delegate(session, plan, {}, 1, time.monotonic() + 12, True, "lead-attempt"),
+                             [{"name": "Second"}])
         self.assertTrue(cleaned_up.is_set())
+        event = lead.store.row("SELECT payload FROM events WHERE session_id=? AND kind='specialist_skipped'", (sid,))
+        self.assertEqual(event["payload"]["name"], "First")
+
+    def test_scoped_specialists_distribute_models_and_validate_source_handoffs(self):
+        lead = self.lead(DockerFixture())
+        project = lead.create_project("Scoped specialists")
+        sid = lead.store.session(project["id"], "Review the changed board", provider_settings({"kind": "demo"}))
+        session = lead.get(sid)
+        session["execution"] = lead.execution_settings()
+        plan = copy.deepcopy(demo.EXAMPLES["lead"])
+        plan["specialists"] = [
+            {"name": name, "persona": "UI review", "assignment": assignment, "stage": "qa", "criterion": "AC1",
+             "paths": [path], "deliverable": "One actionable test"}
+            for name, assignment, path in (("Navigation", "Check navigation", "app.js"),
+                                            ("Layout", "Check layout", "styles.css"))
+        ]
+        validate("lead", plan)
+        with self.assertRaisesRegex(ValueError, "Unknown specialist stage or criterion"):
+            validate("lead", {**plan, "specialists": [{**plan["specialists"][0], "criterion": "AC99"}]})
+        with self.assertRaisesRegex(ValueError, "Unknown specialist stage or criterion"):
+            validate("lead", {**plan, "specialists": [{**plan["specialists"][0], "stage": ["qa"]}]})
+        with self.assertRaisesRegex(ValueError, "distinct names and assignments"):
+            validate("lead", {**plan, "specialists": plan["specialists"][:1] * 2})
+
+        deployments = [{"id": name, "chat": True} for name in ("small", "large")]
+        settings = with_model_pool({}, deployments, {})
+        self.assertNotEqual(model_for_role(settings, "specialist", sid, 0)["model"],
+                            model_for_role(settings, "specialist", sid, 1)["model"])
+        pinned = with_model_pool({}, deployments, {"specialist": "small"})
+        self.assertEqual(model_for_role(pinned, "specialist", sid, 1)["model"], "small")
+
+        def report(_session, _role, data, agent, _until, _sample):
+            assignment = data["specialist"]
+            path = assignment["paths"][0]
+            self.assertEqual(set(data["source"]), {path})
+            self.assertEqual([item["id"] for item in data["criteria"]], ["AC1"])
+            self.assertEqual(data["repository"], {"commit": "pinned"})
+            quote = data["source"][path] if agent["worker_index"] == 0 else "This line did not come from the excerpt."
+            return {"summary": "Review finding", "findings": ["Check interaction"], "recommendations": ["Add the check"],
+                    "evidence": [{"path": path, "quote": quote}]}
+
+        data = {"approved": {"development": {"summary": "Read the changed board."}},
+                "repository": {"commit": "pinned", "excerpts": {"private.txt": "outside assignment"}}}
+        source = {"app.js": "The navigation is keyboard accessible.", "styles.css": "The board uses a two column layout."}
+        with patch.object(lead, "ask", side_effect=report):
+            self.assertEqual(lead.delegate(session, plan, data, 1, time.monotonic() + 10, True, "lead-attempt"), [])
+            results = lead.delegate(session, plan, data, 1, time.monotonic() + 10, True, "lead-attempt", stage="qa", source=source)
+        self.assertEqual([(item["name"], item["stage"], item["criterion"]) for item in results], [("Navigation", "qa", "AC1")])
+        skipped = lead.store.row("SELECT payload FROM events WHERE session_id=? AND kind='specialist_skipped'", (sid,))
+        self.assertIn("assigned source excerpt", skipped["payload"]["message"])
 
     def test_pipeline_retries_qa_and_merges_its_verified_build(self):
         docker = DockerFixture(failures=1)
@@ -265,11 +315,16 @@ class WorkspaceTest(unittest.TestCase):
         url = "https://github.com/example/fieldwork.git"
         observed = {}
         specialist = {"name": "Acceptance specialist", "persona": "Focus on observable user flows.",
-                      "assignment": "Read the repo and suggest acceptance checks."}
+                      "assignment": "Read the README and suggest acceptance checks.", "stage": "architecture",
+                      "criterion": "AC1", "paths": ["README.md"], "deliverable": "An acceptance check for the existing UI"}
 
         def model(settings, key, persona, data, timeout):
             role = next(role for role, instruction in PERSONAS.items() if persona.startswith(instruction))
-            self.assertEqual(data["repository"]["url"], url)
+            if role == "specialist":
+                self.assertEqual(set(data["repository"]), {"commit", "branch"})
+                self.assertEqual(data["source"], {"README.md": "Keep this file.\n"})
+            else:
+                self.assertEqual(data["repository"]["url"], url)
             observed[role] = data["agent_playbook"]["revision"]
             if role == "research" and "round" in data:
                 value = {"urls": [demo.SOURCE] if data["round"] == 1 else [], "done": True}
@@ -376,6 +431,7 @@ class WorkspaceTest(unittest.TestCase):
 
     def test_live_contract_rejects_a_gate_before_starting_next_stage(self):
         calls = []
+        advisory_calls = []
         rejected = False
         checked_source = False
 
@@ -383,7 +439,13 @@ class WorkspaceTest(unittest.TestCase):
             nonlocal rejected, checked_source
             self.assertEqual(key, "test-provider-key-value")
             stage = data["stage"]
-            if "independent QA reviewer" in persona:
+            if "read-only software delivery specialist" in persona:
+                advisory_calls.append(stage)
+                self.assertEqual(data["approved_summaries"].keys(), {"lead", "research"})
+                self.assertNotIn("unrelated workspace note", repr(data))
+                value = {"summary": "Bounded advice", "findings": ["Check network limits"],
+                         "recommendations": ["Keep the app on loopback"]}
+            elif "independent QA reviewer" in persona:
                 if stage == "deploy":
                     self.assertIn("index.html", data["release_source"])
                     report = data["evidence"]["security_review"]
@@ -400,8 +462,16 @@ class WorkspaceTest(unittest.TestCase):
                 value = {"tool_call": {"name": "source_check", "draft": demo.EXAMPLES["development"]}}
             else:
                 value = copy.deepcopy(demo.EXAMPLES[stage])
+                if stage == "lead":
+                    self.assertNotIn("unrelated workspace note", repr(data))
+                    value["specialists"] = [{"name": "Boundary check", "persona": "Review isolation", "stage": "architecture",
+                                             "criterion": "AC1", "paths": [], "assignment": "Check the loopback boundary.",
+                                             "deliverable": "One recommendation for the architecture author"}]
+                if stage == "architecture":
+                    self.assertEqual(data["specialist_evidence"][0]["report"]["summary"], "Bounded advice")
                 if stage == "development":
                     self.assertIn("app.js", data["tool_feedback"]["result"]["syntax_checked"])
+                    self.assertNotIn("specialist_evidence", data)
                 calls.append(stage)
             return json.dumps(release_verdict(data, value)), (13, 9)
 
@@ -410,10 +480,13 @@ class WorkspaceTest(unittest.TestCase):
         lead.configure({"kind": "compatible", "endpoint": "http://127.0.0.1:8181/v1",
                         "model": "fixture", "input_rate": 2, "output_rate": 4, "api_key": "test-provider-key-value"})
         project = lead.store.project("Workshop", "")
+        unrelated = lead.store.project("Other RaceDay", "")
+        lead.store.remember(unrelated["id"], [("decision", "Workshop Fieldwork architecture", "unrelated workspace note")])
         sid = lead.launch(project["id"], demo.PROMPT)
         result = self.completed(lead, sid)
         self.assertEqual(result["state"], "completed", result["error"])
         self.assertEqual(calls, ["lead", "research", "architecture", "architecture", "design", "development", "qa", "deploy"])
+        self.assertEqual(advisory_calls, ["architecture"])
         self.assertGreater(result["tokens"], 0)
         self.assertGreater(result["cost"], 0)
         self.assertNotIn("test-provider-key-value", repr(lead.store.rows("SELECT * FROM events")))

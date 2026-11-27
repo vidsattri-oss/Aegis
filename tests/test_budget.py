@@ -167,6 +167,29 @@ class RaceDayBudgetTest(unittest.TestCase):
         self.assertEqual(calls.count("lead"), 1)
         self.assertEqual(Store(self.data).budget(project)["model_cost"], round(0.013 * len(calls), 8))
 
+    def test_optional_unpriced_specialist_is_skipped_but_the_raceday_cap_still_stops_work(self):
+        model = Mock(side_effect=AssertionError("Unpriced requests must be blocked"))
+        lead = self.lead(model)
+        project = lead.create_project("Optional advisor budget")["id"]
+        lead.budget(project, 1)
+        settings = integrations.provider_settings({"kind": "compatible", "endpoint": "http://127.0.0.1:8181/v1",
+                                                   "model": "fixture"})
+        sid = lead.store.session(project, "Check navigation", settings)
+        session = lead.get(sid)
+        session["execution"] = lead.execution_settings()
+        plan = {"criteria": [{"id": "AC1", "description": "Works with keyboard"}],
+                "specialists": [{"name": "Navigation", "persona": "Accessibility", "assignment": "Identify a focus check",
+                                 "stage": "qa", "criterion": "AC1", "paths": [], "deliverable": "One test"}]}
+        data = {"approved": {}}
+        self.assertEqual(lead.delegate(session, plan, data, 1, time.monotonic() + 6, False, "parent", stage="qa"), [])
+        skipped = lead.store.row("SELECT payload FROM events WHERE session_id=? AND kind='specialist_skipped'", (sid,))
+        self.assertIn("Set rates", skipped["payload"]["message"])
+        self.assertEqual(lead.store.summary(sid)["agents"][0]["status"], "Skipped")
+        lead.budget(project, 0)
+        with self.assertRaisesRegex(BudgetPaused, "budget reached"):
+            lead.delegate(session, plan, data, 1, time.monotonic() + 6, False, "parent", stage="qa")
+        model.assert_not_called()
+
     def test_team_radio_gets_next_slot_without_bypassing_a_raceday_budget(self):
         started = threading.Event()
         release = threading.Event()
