@@ -7,6 +7,7 @@ STAGES = ("research", "architecture", "design", "development", "qa", "deploy")
 LABELS = dict(zip(STAGES, ("Research", "Architecture", "UX/UI Design", "Development", "QA / UAT", "Deploy")))
 LEAD_SANDBOX_TASKS = {"specialist", "build", "qa_browser", "qa_artifact"}
 SPECIALIST_STAGES = STAGES[:-1]
+MAX_BUILD_WORKERS = 3
 PROFILES = {
     "lead": ("worker", 0.5, 128, 48),
     "research": ("worker", 0.5, 128, 48),
@@ -85,6 +86,48 @@ def field(obj, key):
     return value
 
 
+def paths_conflict(left, right):
+    left, right = left.casefold(), right.casefold()
+    return left == right or left.startswith(right + "/") or right.startswith(left + "/")
+
+
+def validate_workstreams(plan):
+    require(isinstance(plan, dict) and set(plan) == {"interface", "tasks"}, "Describe the shared interface and implementation tasks")
+    require(len(field(plan, "interface")) <= 2400, "Keep the shared implementation interface to 2,400 characters")
+    tasks = plan["tasks"]
+    require(isinstance(tasks, list) and 2 <= len(tasks) <= MAX_BUILD_WORKERS, "Parallel implementation requires two or three tasks")
+    owned, names = [], set()
+    for task in tasks:
+        require(isinstance(task, dict) and set(task) == {"name", "assignment", "paths", "read_paths", "criteria"},
+                "Each implementation task needs a name, assignment, writable paths, read paths, and criteria")
+        name, assignment = field(task, "name"), field(task, "assignment")
+        identity = name.casefold().strip()
+        require(len(name) <= 80 and len(assignment) <= 1000 and identity not in names,
+                "Implementation tasks need distinct short names and assignments")
+        names.add(identity)
+        for path in strings(task, "paths", limit=20):
+            safe_path(path)
+            require(not any(paths_conflict(path, prior) for prior in owned), "Parallel implementation paths overlap")
+            owned.append(path)
+        reads = strings(task, "read_paths", minimum=0, limit=10)
+        require(len({safe_path(path) for path in reads}) == len(reads), "Duplicate implementation read path")
+        criteria = strings(task, "criteria", limit=20)
+        require(len(set(criteria)) == len(criteria), "Duplicate implementation criterion")
+
+
+def validate_workstream_patch(patch, owned, existing):
+    require(isinstance(patch, dict) and {"summary", "files"} <= set(patch) <= {"summary", "files", "remove"},
+            "Return a patch summary, changed files, and optional removals")
+    require(len(field(patch, "summary")) <= 800, "Keep the patch summary to 800 characters")
+    files, remove = patch["files"], patch.get("remove", [])
+    require(isinstance(files, dict) and isinstance(remove, list), "Return a file map and a removal list")
+    require(all(path in owned and safe_path(path) for path in files), "The patch writes outside its assigned files")
+    require(all(isinstance(path, str) and path in owned and path in existing and path not in files for path in remove)
+            and len(set(remove)) == len(remove), "The patch removes a file outside its assigned base or tries to edit and remove it")
+    require(all(isinstance(text, str) and "\0" not in text for text in files.values()), "Patch files must be text")
+    require(sum(len(text.encode()) for text in files.values()) <= MAX_BYTES, "Implementation patch is too large")
+
+
 def manifest(files):
     require(isinstance(files, dict) and 2 <= len(files) <= 120, "Expected 2–120 source files")
     size = 0
@@ -116,8 +159,10 @@ def manifest(files):
     require(runtime == "node" or not {"package.json", "package-lock.json"}.intersection(files),
             "npm dependencies require the Node runtime")
     require(runtime == "python" or "requirements.txt" not in files, "requirements.txt requires Python")
-    folded = [p.casefold() for p in files]
-    require(len(set(folded)) == len(folded), "Source paths collide on case-insensitive filesystems")
+    folded = {path.casefold() for path in files}
+    require(len(folded) == len(files), "Source paths collide on case-insensitive filesystems")
+    require(not any(str(parent) in folded for path in folded for parent in PurePosixPath(path).parents),
+            "A source path cannot be both a file and a directory")
     return config
 
 
@@ -188,6 +233,8 @@ def validate(role, obj):
             strings(obj, name)
         for name in ("dataModel", "api", "boundaries"):
             field(obj, name)
+        if "implementation" in obj:
+            validate_workstreams(obj["implementation"])
     elif role == "design":
         for name in ("flows", "wireframes", "components", "accessibility", "decisions"):
             strings(obj, name)

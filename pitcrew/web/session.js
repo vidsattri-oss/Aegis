@@ -14,6 +14,9 @@ const eventNames = {
   capacity_wait: "Waiting for Docker capacity", execution_plan: "Docker task sizes",
   released: "Released", preview_stopped: "Preview stopped", cancelled: "Cancelled", interrupted: "Interrupted",
   delegated: "Specialist assigned", specialist_delivered: "Specialist reported", specialist_skipped: "Specialist unavailable",
+  implementation_round: "Build Crew assigned", implementation_patch: "Workstream patch validated",
+  implementation_reused: "Workstream patch reused", implementation_integrated: "Workstream patches integrated",
+  implementation_fallback: "Build Crew integration needs attention",
   github_base: "GitHub base", github_published: "GitHub branch published",
 };
 const toolNames = {

@@ -1,5 +1,6 @@
 """Lead-controlled orchestration, independent approval and fault recovery."""
 import copy
+import hashlib
 import http.client
 import json
 import threading
@@ -14,8 +15,9 @@ from .agent_cli import AGENT_CLIS
 from .azure_prices import azure_token_rates
 from .credentials import ProviderCredentials, validate_key
 from .config import environment
-from .contracts import (CONTRACTS, GUARD, INJECT, LABELS, LEAD_SANDBOX_TASKS, PERSONAS, SPECIALIST_STAGES, STAGES,
-                        manifest, require, validate)
+from .contracts import (CONTRACTS, GUARD, INJECT, LABELS, LEAD_SANDBOX_TASKS, MAX_BUILD_WORKERS, MAX_BYTES, PERSONAS,
+                        SPECIALIST_STAGES, STAGES, manifest, paths_conflict, require, validate, validate_workstream_patch,
+                        validate_workstreams)
 from .extensions import BROWSER_SKILL_BYTES, Extensions, atomic_text, bounded_text, browser_skill, configuration
 from .mcp_oauth import MCPOAuth
 from .integrations import (DEFAULT_HOSTS, NAME, VERSION, advisories, complete, environment_provider, fetch_source,
@@ -147,6 +149,7 @@ class Lead:
         self.workers = ThreadPoolExecutor(max_workers=MAX_SESSIONS, thread_name_prefix="factory")
         self.reviewers = ThreadPoolExecutor(max_workers=2 * MAX_SESSIONS, thread_name_prefix="gate-review")
         self.specialists = ThreadPoolExecutor(max_workers=2 * MAX_SESSIONS, thread_name_prefix="specialist")
+        self.implementers = ThreadPoolExecutor(max_workers=MAX_BUILD_WORKERS * MAX_SESSIONS, thread_name_prefix="build-crew")
         self.chats = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lead-chat")
         self.research_hosts = tuple(dict.fromkeys((*DEFAULT_HOSTS, *(
             name.strip().lower() for name in environment("PITCREW_RESEARCH_HOSTS", "").split(",") if name.strip()
@@ -439,6 +442,7 @@ class Lead:
             preview.close()
         self.workers.shutdown(wait=True, cancel_futures=True)
         self.specialists.shutdown(wait=True, cancel_futures=True)
+        self.implementers.shutdown(wait=True, cancel_futures=True)
         self.reviewers.shutdown(wait=True, cancel_futures=True)
         self.chats.shutdown(wait=True, cancel_futures=True)
         self.dream_thread.join(timeout=2)
@@ -677,7 +681,7 @@ class Lead:
                 "retry_context": failure, "hive_memory": memory}
         if notes := self.operator_notes(session["id"]):
             data["operator_notes"] = notes
-        if stage == "lead":
+        if stage in ("lead", "architecture"):
             data["source_paths"] = sorted(previous)
         if "repository" in session:
             excerpts = {}
@@ -712,6 +716,7 @@ class Lead:
         assigned = plan.get("stages", {}).get(stage)
         stage_advisors = any(item.get("stage") == stage for item in plan.get("specialists", []))
         advisor_reports, advisor_notes = [], None
+        parallel = None
         for number in range(1, ATTEMPTS + 1):
             until = time.monotonic() + self.timeout
             self.check(sid, until)
@@ -733,21 +738,34 @@ class Lead:
                     advisor_notes = data.get("operator_notes", [])
                 if advisor_reports:
                     data["specialist_evidence"] = advisor_reports
+                integrated = None
+                if (stage == "development" and number == 1 and not session.get("repair")
+                        and "implementation" in approved["architecture"]):
+                    parallel = self.implement_in_parallel(session, data, approved, previous, agent_id, until, sample, extensions)
+                if parallel:
+                    candidate, workstreams, errors = parallel
+                    if number == 1 and not errors:
+                        integrated = candidate
+                    else:
+                        data["partial_implementation"] = {"candidate": candidate, "errors": errors}
                 task = {"development": "build", "deploy": "release"}.get(stage)
                 if stage == "qa":
                     task = "qa_browser" if manifest(approved["development"]["files"])["mode"] == "web" else "qa_artifact"
                 profiles = [profile(stage, session["execution"])]
-                if extensions:
-                    profiles += extensions.sandbox_profiles(stage)
+                stage_extensions = extensions if integrated is None else None
+                if stage_extensions:
+                    profiles += stage_extensions.sandbox_profiles(stage)
                 execution_resources = (lap_profile(task, session["execution"], plan, 2 if session.get("repair") else number)
                                        if task else None)
                 if execution_resources:
                     profiles.append(execution_resources)
                 with (self.reserve_containers(session, until, profiles),
-                      self.agent(session, stage, stage, number, data, until, agent_id, extensions=extensions) as role):
-                    artifact, role_evidence = self.produce(session, stage, data, approved, role, until, sample)
+                      self.agent(session, stage, stage, number, data, until, agent_id, extensions=stage_extensions) as role):
+                    artifact, role_evidence = self.produce(session, stage, data, approved, role, until, sample, integrated=integrated)
                     evidence = self.verify(session, stage, artifact, approved, role, until, sample, execution_resources)
                     evidence["role_tool"] = role_evidence
+                    if parallel:
+                        evidence["implementation"] = {"workstreams": workstreams, "fallback": integrated is None, "errors": errors}
                 self.check(sid, until)
                 specialists = advisor_reports
                 if specialists:
@@ -885,6 +903,110 @@ class Lead:
             self.store.event(session["id"], "specialist_delivered", trace, agent["id"])
             return {"name": assignment["name"], "stage": stage, "criterion": criterion, "attempt": agent["id"], "report": report}
 
+    def implement_in_parallel(self, session, data, approved, base, parent, until, sample, extensions):
+        sid = session["id"]
+        architecture = approved["architecture"]
+        plan = architecture["implementation"]
+        criteria = {item["id"]: item["description"] for item in approved["lead"]["criteria"]}
+        try:
+            validate_workstreams(plan)
+            require(all(set(task["criteria"]) <= criteria.keys() for task in plan["tasks"]),
+                    "Implementation tasks must refer to approved acceptance criteria")
+        except ValueError as exc:
+            self.store.event(sid, "implementation_fallback", {"stage": "development", "parent": parent, "errors": [str(exc)]})
+            return None, [], [str(exc)]
+        tasks = plan["tasks"]
+        inventory = set(base) | session.get("github_entries", {}).keys()
+        collisions = [path for task in tasks for path in task["paths"] if any(
+            paths_conflict(path, existing) for existing in inventory if path != existing or path not in base)]
+        if collisions:
+            errors = ["Workstream paths conflict with existing or excluded files: " + ", ".join(collisions)]
+            self.store.event(sid, "implementation_fallback", {"stage": "development", "parent": parent, "errors": errors})
+            return None, [], errors
+        revision = session.get("github_base") or hashlib.sha256(encode(sorted(base.items())).encode()).hexdigest()
+        self.store.event(sid, "implementation_round", {"stage": "development", "parent": parent, "base": revision,
+                                                       "tasks": [{"name": task["name"], "paths": task["paths"]} for task in tasks]})
+        design = approved["design"]
+        shared = {"request": data["request"], "stage": "development", "interface": plan["interface"], "base": revision,
+                  "architecture": {key: architecture[key] for key in ("runtime", "mode", "dataModel", "api", "boundaries")},
+                  "design": {"summary": design["summary"], **{
+                      key: [item[:1200] for item in design[key][:8]] for key in ("flows", "wireframes", "components", "accessibility")}},
+                  "runtime_contract": data["runtime_contract"]}
+        for key in ("operator_notes", "lead_guidance"):
+            if key in data:
+                shared[key] = data[key]
+        deadline = min(until, time.monotonic() + self.timeout * 0.65)
+        futures = []
+        for index, task in enumerate(tasks):
+            files = {path: base[path] for path in task["paths"] + task["read_paths"] if path in base}
+            payload = {**shared, "workstream": task, "criteria": {key: criteria[key] for key in task["criteria"]},
+                       "previous_source": files}
+            if advice := [item for item in data.get("specialist_evidence", []) if item["criterion"] in task["criteria"]]:
+                payload["specialist_evidence"] = advice
+            futures.append(self.implementers.submit(self.implementation_patch, session, payload, index,
+                                                    deadline, sample, extensions))
+        wait(futures)
+        self.check(sid, until)
+        files, changes, failures = dict(base), [], []
+        for task, future in zip(tasks, futures):
+            try:
+                patch, attempt, reused = future.result()
+            except (BudgetPaused, Cancelled):
+                raise
+            except (ValueError, RuntimeError, OSError, http.client.HTTPException) as exc:
+                failures.append(f"{task['name']}: {self.store.redact(str(exc))[:400]}")
+                continue
+            for path in patch.get("remove", []):
+                del files[path]
+            files.update(patch["files"])
+            changes.append({"name": task["name"], "attempt": attempt, "files": sorted(patch["files"]),
+                            "removed": sorted(patch.get("remove", [])), "summary": patch["summary"], "reused": reused})
+        candidate = {"summary": "Integrated Build Crew patches from " + ", ".join(item["name"] for item in changes), "files": files}
+        try:
+            validate("development", candidate)
+        except ValueError as exc:
+            failures.append(self.store.redact(str(exc))[:400])
+        if len(files) > 120 or sum(len(content.encode()) for content in files.values()) > MAX_BYTES:
+            candidate = None
+        self.store.event(sid, "implementation_integrated" if not failures else "implementation_fallback", {
+            "stage": "development", "parent": parent, "workstreams": changes, "errors": failures})
+        return candidate if changes else None, changes, failures
+
+    def implementation_patch(self, session, data, index, until, sample, extensions):
+        sid = session["id"]
+        self.check(sid, until)
+        task = data["workstream"]
+        owned, existing = task["paths"], sorted(data["previous_source"])
+        guidance = extensions.guidance("development") if extensions else ""
+        playbook = self.store.playbook(session["project_id"], "development")
+        key = hashlib.sha256(encode([data, guidance, playbook]).encode()).hexdigest()
+        receipt = self.store.row("""SELECT attempt_id,payload FROM events WHERE session_id=? AND kind='implementation_patch'
+                                   AND json_extract(payload,'$.key')=? ORDER BY id DESC LIMIT 1""", (sid, key))
+        if receipt:
+            patch = receipt["payload"]["patch"]
+            validate_workstream_patch(patch, owned, existing)
+            self.store.event(sid, "implementation_reused", {"stage": "development", "name": task["name"]}, receipt["attempt_id"])
+            return patch, receipt["attempt_id"], True
+        resources = profile("development", session["execution"])
+        with (self.reserve_containers(session, until, [resources]),
+              self.agent(session, "development", "development", 1, data, until, extensions=extensions, resources=resources) as agent):
+            agent["worker_index"] = index
+            for attempt in range(2):
+                draft = self.ask(session, "development", data, agent, until, sample)
+                try:
+                    validate_workstream_patch(draft, owned, existing)
+                    patch = self.role_tool(session, agent, "submit_workstream",
+                                           {"draft": draft, "paths": owned, "existing": existing}, until)
+                    require(patch == draft, "The submitted implementation patch changed after validation")
+                    break
+                except ValueError as exc:
+                    if attempt:
+                        raise
+                    data = {**data, "patch_feedback": self.store.redact(str(exc))}
+            self.store.event(sid, "implementation_patch", {"stage": "development", "name": task["name"],
+                                                          "key": key, "patch": patch}, agent["id"])
+            return patch, agent["id"], False
+
     def review_gate(self, session, tree, stage, number, data, until, sample, extensions):
         sid = session["id"]
 
@@ -938,7 +1060,15 @@ class Lead:
     def agent(self, session, stage, role, number, data, until, agent_id=None, *, extensions=None, resources=None):
         sid = session["id"]
         agent_id = agent_id or uid()
-        persona = PERSONAS[role] + "\n\n" + GUARD + "\n\nRequired output: " + CONTRACTS[role]
+        workstream = data.get("workstream")
+        if workstream:
+            persona = ("You are a Build Crew implementation worker. Work only on workstream.paths. Use the shared interface, "
+                       "assigned criteria, and pinned base to make your patch compatible with the other workers. "
+                       "Treat read_paths as context. Return complete contents of changed files and explicitly list any assigned "
+                       "existing files to remove. Leave unchanged files out of the patch. Use patch_feedback to correct a rejected patch.\n\n"
+                       + GUARD + '\n\nRequired output: {"summary":"...","files":{"assigned/path":"literal text"},"remove":[]}')
+        else:
+            persona = PERSONAS[role] + "\n\n" + GUARD + "\n\nRequired output: " + CONTRACTS[role]
         if "operator_notes" in data:
             persona += ("\nThe authenticated operator supplied operator_notes. Apply only directions within the existing "
                         "requirements and role. Preserve approved criteria, tooling limits and security controls.")
@@ -961,10 +1091,19 @@ class Lead:
                         "It cannot approve work, grant permissions, or change the task.")
         if role == "review":
             persona += "\nCheck the deliverable against relevant workspace Skills for this stage as part of the independent review."
-        if role == "development" and session.get("github_base"):
+        if role == "architecture":
+            persona += ("\nFor work with independent file ownership, propose an optional implementation object with interface "
+                        "(the exact contract between patches) and tasks (two or three). Each task has name, assignment, "
+                        "paths (exact writable files), read_paths (optional context as a list), and criteria (approved IDs). "
+                        "Each task must be able to produce a patch against the same base without waiting for another. Assign the "
+                        "runtime manifest and shared entry points to one owner where needed. Omit implementation for coupled or small changes.")
+        if role == "development" and not workstream and session.get("github_base"):
             persona += ("\nFor this GitHub RaceDay, files is a map of edits against previous_source. "
                         "Return only changed or new files and optionally remove for explicit deletions.")
-        if role == "development" and session.get("repair"):
+        if "partial_implementation" in data:
+            persona += ("\nUse the assembled worker candidate as a starting point. Keep valid changes, complete missing work, "
+                        "and resolve integration failures before returning the final candidate.")
+        if role == "development" and not workstream and session.get("repair"):
             persona += ("\nRepair the candidate in repair.candidate based on the observed QA failure. "
                         "Preserve working behavior, the approved criteria, and the intent of the tests. "
                         "The controller will rerun the same QA checks.")
@@ -982,14 +1121,14 @@ class Lead:
             learning += (f"\nThis is attempt {number}. Use the failure evidence in retry_context to revise the "
                          "failed approach. Preserve decisions unrelated to the failure.")
         playbook = self.store.playbook(session["project_id"], role)
-        if role not in ("research", "review", "specialist"):
+        if role not in ("research", "review", "specialist") and not workstream:
             name, description = ROLE_TOOLS[role]
             persona += (f"\n\nOptional sandbox tool {name}. {description} You may make up to two tool requests "
                         'before delivering the final object. Request a tool with a JSON object shaped as '
                         '{"tool_call":{"name":"' + name + '","draft":{...}}}.')
         skill_roles = (role, stage) if role == "review" or (role == "specialist" and stage != "lead") else (role,)
         guidance = extensions.guidance(*skill_roles) if extensions else ""
-        mcp_granted = extensions.server_grants(role) if extensions and role != "specialist" else []
+        mcp_granted = extensions.server_grants(role) if extensions and role != "specialist" and not workstream else []
         extension_instructions = ""
         if guidance:
             extension_instructions += ("\n\nUse these workspace-selected Skills where relevant. "
@@ -1006,6 +1145,9 @@ class Lead:
         resources = resources or profile(role, session["execution"])
         if role == "specialist":
             resources["persona_name"] = data["specialist"]["name"]
+        if workstream:
+            resources["persona_name"] = workstream["name"]
+            resources["tools"] = ["submit_workstream"]
         started = time.monotonic()
         self.store.write("""
             INSERT INTO attempts (id,session_id,stage,role,number,status,profile,started,persona,input)
@@ -1092,6 +1234,9 @@ class Lead:
                 result = {"summary": "Keep the acceptance checks tied to observable behavior.",
                           "findings": ["The plan lists acceptance criteria."],
                           "recommendations": ["Use a separate check for each criterion."]}
+            elif role == "development" and "workstream" in data:
+                result = {"summary": data["workstream"]["name"],
+                          "files": {path: demo.FILES[path] for path in data["workstream"]["paths"] if path in demo.FILES}}
             else:
                 result = copy.deepcopy(demo.EXAMPLES[role])
             tokens = (0, 0)
@@ -1301,19 +1446,22 @@ class Lead:
         require(isinstance(files, dict) and isinstance(remove, list), "Return GitHub file edits and optional removals")
         require(all(isinstance(name, str) and name in original and name not in files for name in remove)
                 and len(set(remove)) == len(remove), "Remove only existing editable paths, once each")
-        require(all(name not in session["github_entries"] or name in original for name in files),
+        excluded = session["github_entries"].keys() - original.keys()
+        require(all(isinstance(name, str) and not any(paths_conflict(name, protected) for protected in excluded) for name in files),
                 "Cannot replace an excluded GitHub path")
         removals = set(remove)
         return {**draft, "files": {**{name: content for name, content in original.items() if name not in removals}, **files}}
 
-    def produce(self, session, stage, data, approved, agent, until, sample):
+    def produce(self, session, stage, data, approved, agent, until, sample, *, integrated=None):
         name = ROLE_TOOLS[stage][0]
         arguments = {}
         if stage == "qa":
             arguments["criteria"] = [item["id"] for item in approved["lead"]["criteria"]]
         if stage == "deploy":
             arguments["files"] = approved["development"]["files"]
-        if stage == "research":
+        if integrated is not None:
+            candidate = integrated
+        elif stage == "research":
             candidate = self.research(session, data, agent, until, sample)
             arguments["sources"] = candidate["evidence"]
         elif stage == "qa" and session.get("repair"):
@@ -1335,7 +1483,7 @@ class Lead:
                     output = {"error": self.store.redact(str(exc))}
                 # Carry the draft and feedback so the model can revise a failed check.
                 data = {**data, "tool_feedback": {"draft": tool["draft"], "result": output}}
-        if stage == "development" and session.get("github_base"):
+        if stage == "development" and session.get("github_base") and integrated is None:
             candidate = self.merge_github_edits(session, candidate)
         validate(stage, candidate)
         if stage == "lead":
@@ -1365,7 +1513,11 @@ class Lead:
 
     def verify(self, session, stage, artifact, approved, agent, until, sample, resources):
         evidence = {"contract": "passed"}
-        if stage == "development":
+        if stage == "architecture" and "implementation" in artifact:
+            criteria = {item["id"] for item in approved["lead"]["criteria"]}
+            require(all(set(task["criteria"]) <= criteria for task in artifact["implementation"]["tasks"]),
+                    "Implementation tasks must refer to approved acceptance criteria")
+        elif stage == "development":
             files = artifact["files"]
             config = manifest(files)
             architecture = approved["architecture"]

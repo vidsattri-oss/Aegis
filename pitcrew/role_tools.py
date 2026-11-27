@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .contracts import MAX_BYTES, STAGES, manifest, require, strings, validate
+from .contracts import MAX_BYTES, STAGES, manifest, require, strings, validate, validate_workstream_patch
 
 FRAME_LIMIT = MAX_BYTES * 6
 ROLE_TOOLS = {
@@ -69,6 +69,9 @@ def invoke(role, tool, arguments):
     require(isinstance(draft, dict), "Tool draft must be an object")
     if tool == "submit":
         validate(role, draft)
+        return draft
+    if role == "development" and tool == "submit_workstream":
+        validate_workstream_patch(draft, arguments["paths"], arguments["existing"])
         return draft
     require(tool == ROLE_TOOLS[role][0], "Tool is outside this role's allowlist")
 

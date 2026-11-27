@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .config import environment
-from .contracts import PROFILES, require
+from .contracts import MAX_BUILD_WORKERS, PROFILES, require
 from .preflight import CACHES
 from .role_tools import FRAME_LIMIT, ROLE_TOOLS
 
@@ -96,7 +96,8 @@ def adaptive_lap_limit(plan, pressure):
         return 1
     limits = plan["limits"]
     peaks = [("development", "build"), ("qa", "qa_browser"), ("deploy", "release"),
-             ("specialist", "specialist"), ("review",) * (2 if plan["parallel_reviews"] else 1)]
+             ("development",) * MAX_BUILD_WORKERS, ("specialist", "specialist"),
+             ("review",) * (2 if plan["parallel_reviews"] else 1)]
     previews = [hold for hold in pressure["holds"] if "preview" in hold["tasks"]]
     slots = []
     for resource in ("cpu", "ram"):

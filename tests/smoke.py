@@ -16,7 +16,7 @@ from pitcrew.sandbox import Docker
 class RepairSmokeLead(Lead):
     def ask_model(self, session, role, data, agent, until, sample, *, instruction=None):
         draft = super().ask_model(session, role, data, agent, until, sample, instruction=instruction)
-        if role == "development" and "repair" not in data:
+        if role == "development" and "repair" not in data and "index.html" in draft["files"]:
             path = "index.html"
             draft["files"][path] = draft["files"][path].replace(demo.TITLE, "Wrong title for QA", 1)
         return draft
@@ -39,6 +39,13 @@ def main():
             ]
             demo.EXAMPLES["lead"]["sandbox_sizes"] = {"build": "compact", "specialist": "compact"}
             demo.EXAMPLES["lead"]["crew_notes"] = {"development": "Keep a stable heading for the QA journey."}
+            demo.EXAMPLES["architecture"]["implementation"] = {"interface": "Use the existing DOM IDs and load app.js from index.html.",
+                "tasks": [
+                    {"name": "Page structure", "assignment": "Build the entry page and runtime manifest.",
+                     "paths": ["index.html", "harness.json"], "read_paths": [], "criteria": ["AC1"]},
+                    {"name": "Board behavior", "assignment": "Implement board interactions and styling.",
+                     "paths": ["app.js", "styles.css", "panorama.css"], "read_paths": ["index.html"], "criteria": ["AC2"]},
+                ]}
             sid = lead.launch(project["id"], "", sample=True)
             deadline = time.monotonic() + 600
             while time.monotonic() < deadline:
@@ -50,7 +57,11 @@ def main():
                 raise AssertionError(f"{session['stage']} ended with {session['state']}: {session['error']}")
             summary = lead.store.summary(sid)
             assert len(summary["gates"]) == 7
-            assert len([agent for agent in summary["agents"] if agent["role"] == "development"]) == 2
+            developers = [agent for agent in summary["agents"] if agent["role"] == "development"]
+            assert len(developers) == 4
+            workers = [item for item in developers if item["profile"].get("persona_name")]
+            assert len(workers) == 2 and all(item["profile"]["network"] == "none" for item in workers)
+            assert lead.store.row("SELECT id FROM events WHERE session_id=? AND kind='implementation_integrated'", (sid,))
             assert lead.store.row("SELECT id FROM events WHERE session_id=? AND kind='repair_requested'", (sid,))
             specialists = [agent for agent in summary["agents"] if agent["role"] == "specialist"]
             assert len(specialists) == 2 and all(agent["status"] == "Success" for agent in specialists)
@@ -68,7 +79,7 @@ def main():
                 assert b"data:image/webp;base64," in response.read()
             with ZipFile(session["bundle"]) as archive:
                 assert archive.testzip() is None and set(demo.FILES) <= set(archive.namelist())
-            print("Lead plan, compact sandboxes, specialists, QA repair, release security, isolated preview, and build ZIP passed.")
+            print("Lead plan, specialists, parallel implementation, QA repair, release security, isolated preview, and build ZIP passed.")
         finally:
             lead.close()
 
