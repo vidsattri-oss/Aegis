@@ -4,7 +4,7 @@ import re
 from pathlib import PurePosixPath
 
 STAGES = ("research", "architecture", "design", "development", "qa", "deploy")
-LABELS = dict(zip(STAGES, ("Research", "Architecture", "UX/UI Design", "Development", "QA / UAT", "Deploy")))
+LABELS = dict(zip(STAGES, ("Research", "Architecture", "Design", "Development", "Testing", "Release"), strict=True))
 LEAD_SANDBOX_TASKS = {"specialist", "build", "qa_browser", "qa_artifact"}
 SPECIALIST_STAGES = STAGES[:-1]
 MAX_BUILD_WORKERS = 3
@@ -194,11 +194,11 @@ def validate(role, obj):
         sizes = obj.get("sandbox_sizes", {})
         require(isinstance(sizes, dict) and set(sizes) <= LEAD_SANDBOX_TASKS
                 and all(size in ("compact", "standard") for size in sizes.values()),
-                "Select compact or standard for supported Lap sandbox tasks")
+                "Select compact or standard for supported Session sandbox tasks")
         notes = obj.get("crew_notes", {})
         require(isinstance(notes, dict) and set(notes) <= {*STAGES, "specialist"} and all(
             isinstance(note, str) and 0 < len(note.strip()) <= 800 and not INJECT.search(note) for note in notes.values()),
-            "Crew notes must be short instructions for an existing role")
+            "Session notes must be short instructions for an existing role")
         specialists = obj.get("specialists", [])
         require(isinstance(specialists, list) and len(specialists) <= 2, "Select up to two optional specialists")
         identities, assignments = set(), set()

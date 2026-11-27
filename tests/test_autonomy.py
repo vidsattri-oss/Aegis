@@ -9,10 +9,10 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import test_workspace
-from pitcrew import demo
-from pitcrew.engine import Lead
-from pitcrew.integrations import provider_settings
-from pitcrew.sandbox import ExecutionFailed, adaptive_lap_limit, execution_plan, execution_policy
+from aegis import demo
+from aegis.engine import Lead
+from aegis.integrations import provider_settings
+from aegis.sandbox import ExecutionFailed, adaptive_session_limit, execution_plan, execution_policy
 
 
 class AutonomyTest(unittest.TestCase):
@@ -25,12 +25,12 @@ class AutonomyTest(unittest.TestCase):
         capacity = {"cpu": 8, "ram": 4096}
         plan = execution_plan(policy, capacity)
         pressure = {"budget": {"cpu": 8, "ram": 3584}, "external": {"cpu": 0, "ram": 0}, "holds": []}
-        self.assertEqual(adaptive_lap_limit(plan, pressure), 2)
+        self.assertEqual(adaptive_session_limit(plan, pressure), 2)
         pressure["holds"] = [{"tasks": ["preview"], "cpu": 1, "ram": 512}]
-        self.assertEqual(adaptive_lap_limit(plan, pressure), 1)
+        self.assertEqual(adaptive_session_limit(plan, pressure), 1)
         pressure["external"] = None
-        self.assertEqual(adaptive_lap_limit(plan, pressure), 1)
-        self.assertEqual(adaptive_lap_limit({**plan, "adaptive_sessions": False}, pressure), 6)
+        self.assertEqual(adaptive_session_limit(plan, pressure), 1)
+        self.assertEqual(adaptive_session_limit({**plan, "adaptive_sessions": False}, pressure), 6)
 
     def test_scheduler_admits_more_work_when_pressure_recovers(self):
         class Docker(test_workspace.DockerFixture):
@@ -52,7 +52,7 @@ class AutonomyTest(unittest.TestCase):
         def run(session):
             running[session["project_id"]].set()
             if not finish.wait(20):
-                raise TimeoutError("Test did not release the lap")
+                raise TimeoutError("Test did not release the session")
             lead.store.update(session["id"], state="completed")
 
         with patch.object(lead, "_run", side_effect=run):

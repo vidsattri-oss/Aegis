@@ -15,19 +15,19 @@ def source_file(path):
 def main():
     target = ROOT / "dist"
     target.mkdir(exist_ok=True)
-    binary = target / "pitcrew"
-    with tempfile.TemporaryDirectory(prefix="pitcrew-build-") as scratch:
+    binary = target / "aegis"
+    with tempfile.TemporaryDirectory(prefix="aegis-build-") as scratch:
         packed = Path(scratch)
-        shutil.copytree(ROOT / "pitcrew", packed / "pitcrew", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        temporary = target / "pitcrew.tmp"
-        zipapp.create_archive(packed, temporary, main="pitcrew.cli:main", interpreter="/usr/bin/env python3",
+        shutil.copytree(ROOT / "aegis", packed / "aegis", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        temporary = target / "aegis.tmp"
+        zipapp.create_archive(packed, temporary, main="aegis.cli:main", interpreter="/usr/bin/env python3",
                               compressed=True)
         temporary.replace(binary)
-    app = target / "pitcrew-src.tar.gz"
-    temporary = target / "pitcrew-src.tmp"
+    app = target / "aegis-src.tar.gz"
+    temporary = target / "aegis-src.tmp"
     with tarfile.open(temporary, "w:gz") as archive:
         for name in ("README.md", "Makefile", "requirements-dev.txt", ".coveragerc", ".gitignore", ".dockerignore",
-                     "containers", "pitcrew", "omni", "tests", "examples", "docs/screenshots"):
+                     "containers", "aegis", "pitcrew", "omni", "tests", "examples", "docs/screenshots"):
             path = ROOT / name
             if path.is_file():
                 archive.add(path, arcname=name)

@@ -243,11 +243,11 @@ class Store:
         require(limit is None or usd_amount(limit) is not None and limit == round(limit, 2),
                 "Enter a USD budget from 0 to 1,000,000 with up to two decimal places")
         require(self.write("UPDATE projects SET budget_usd=?,budget_hold=NULL WHERE id=?", (limit, project_id)),
-                "RaceDay does not exist")
+                "Project does not exist")
         return self.budget(project_id)
 
     def reconcile_model_usage(self, db):
-        reason = "A model request was interrupted before its charge was recorded. Review the vendor usage and save the RaceDay budget before resuming."
+        reason = "A model request was interrupted before its charge was recorded. Review the vendor usage and save the Project budget before resuming."
         db.execute("""UPDATE projects SET budget_hold=? WHERE budget_usd IS NOT NULL AND id IN (
                       SELECT s.project_id FROM sessions s JOIN attempts a ON a.session_id=s.id
                       WHERE a.metering_pending=1)""", (reason,))
@@ -326,9 +326,9 @@ class Store:
                        (build, preview, github_commit, stamp, session_id))
             db.execute("INSERT INTO events (session_id,time,kind,payload) VALUES (?,?,'released',?)",
                        (session_id, stamp, event))
-            message = "All six stages passed. The build is available in Parc Fermé."
+            message = "All six stages passed. The build is available in Release."
             if github_commit:
-                message += " The GitHub work is committed locally and ready to publish on its lap branch."
+                message += " The GitHub work is committed locally and ready to publish on its session branch."
             db.execute("INSERT INTO messages (session_id,speaker,text,created) VALUES (?,'lead',?,?)",
                        (session_id, message, stamp))
 

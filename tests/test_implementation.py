@@ -8,10 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import test_workspace
-from pitcrew import demo
-from pitcrew.contracts import manifest, validate_workstreams
-from pitcrew.engine import BudgetPaused, Lead
-from pitcrew.usage import Usage
+from aegis import demo
+from aegis.contracts import manifest, validate_workstreams
+from aegis.engine import BudgetPaused, Lead
+from aegis.usage import Usage
 
 
 def implementation_plan():
@@ -29,7 +29,7 @@ class ImplementationTest(unittest.TestCase):
         return self.enterContext(closing(Lead(directory, docker=test_workspace.DockerFixture(), **kwargs)))
 
     def setup_stage(self, lead):
-        project = lead.create_project("Parallel Build Crew")
+        project = lead.create_project("Parallel Development Team")
         sid = lead.store.session(project["id"], "Build the board", lead.provider())
         session = lead.get(sid)
         session["execution"] = lead.execution_settings()

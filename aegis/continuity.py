@@ -16,14 +16,14 @@ from .store import encode, uid
 DATABASE = "workspace.sqlite3"
 HISTORY = "monorepo.bundle"
 BUILD = re.compile(r"builds/[0-9a-f]{16}\.zip\Z")
-MARKER = "pitcrew-backup-v1"
+MARKER = "aegis-backup-v1"
 LEGACY_MARKER = re.compile(r"([a-z][a-z0-9]{0,63})-backup-v1\Z")
 
 
 def backup_workspace(directory, output):
     require((directory / DATABASE).is_file(), "The workspace database does not exist")
     require(not os.path.lexists(output), "Backup output already exists")
-    with TemporaryDirectory(prefix=".pitcrew-backup-", dir=output.parent) as temporary:
+    with TemporaryDirectory(prefix=".aegis-backup-", dir=output.parent) as temporary:
         staging = Path(temporary)
         with (closing(sqlite3.connect((directory / DATABASE).as_uri() + "?mode=ro", uri=True)) as source,
               closing(sqlite3.connect(staging / DATABASE)) as snapshot):
@@ -33,7 +33,7 @@ def backup_workspace(directory, output):
             Repository.git(monorepo, "bundle", "create", str(staging / HISTORY), "--all")
         archive_path = staging / "workspace.zip"
         with ZipFile(archive_path, "w", compression=ZIP_DEFLATED) as archive:
-            archive.writestr(MARKER, "Pit Crew Harness workspace backup\n")
+            archive.writestr(MARKER, "Aegis workspace backup\n")
             archive.write(staging / DATABASE, DATABASE)
             if (staging / HISTORY).is_file():
                 archive.write(staging / HISTORY, HISTORY)
@@ -48,7 +48,7 @@ def backup_workspace(directory, output):
 
 def restore_workspace(backup, destination):
     require(not os.path.lexists(destination), "Choose a new workspace directory for restore")
-    with TemporaryDirectory(prefix=".pitcrew-restore-", dir=destination.parent) as temporary:
+    with TemporaryDirectory(prefix=".aegis-restore-", dir=destination.parent) as temporary:
         staging = Path(temporary) / "workspace"
         staging.mkdir(mode=0o700)
         with ZipFile(backup) as archive:
@@ -56,13 +56,13 @@ def restore_workspace(backup, destination):
             markers = {name: match[1] for name in entries if (match := LEGACY_MARKER.fullmatch(name))}
             require(len(entries) == len(set(entries)) and len(markers) == 1 and DATABASE in entries and all(
                 name in markers or name in (DATABASE, HISTORY) or BUILD.fullmatch(name) for name in entries
-            ), "Invalid Pit Crew Harness backup manifest")
+            ), "Invalid Aegis backup manifest")
             marker, application = next(iter(markers.items()))
-            if marker != MARKER:
-                # Older v1 backups recorded the same application name in both the marker and its contents.
-                expected = f"{application} workspace backup\n".encode("ascii")
-                require(archive.getinfo(marker).file_size == len(expected)
-                        and archive.read(marker).lower() == expected, "Invalid Pit Crew Harness backup marker")
+            # The previous package name used a longer product name inside its backup marker.
+            label = "pit crew harness" if application == "pitcrew" else application
+            expected = f"{label} workspace backup\n".encode("ascii")
+            require(archive.getinfo(marker).file_size == len(expected)
+                    and archive.read(marker).lower() == expected, "Invalid Aegis backup marker")
             for name in entries:
                 if name == marker:
                     continue
@@ -114,13 +114,14 @@ def user_service(app, directory, port, docker_context=None):
     app = Path(app).resolve()
     packaged = app.suffix == ".pyz" or is_zipfile(app)
     working = app.parent if packaged else Path(__file__).resolve().parents[1]
-    entry = [app] if packaged else ["-m", "pitcrew"]
+    entry = [app] if packaged else ["-m", "aegis"]
     args = [sys.executable, *entry, "serve", "--port", port, "--data", directory]
     command = " ".join(unit_arg(arg, command=True) for arg in args)
     context = f"Environment={unit_arg('DOCKER_CONTEXT=' + docker_context)}\n" if docker_context else ""
-    return ("[Unit]\nDescription=Pit Crew Harness local workspace\n\n"
+    return ("[Unit]\nDescription=Aegis local workspace\n\n"
             "[Service]\nType=exec\n"
             f"WorkingDirectory={unit_value(working)}\n{context}"
             "EnvironmentFile=-%h/.config/pitcrew/service.env\n"
+            "EnvironmentFile=-%h/.config/aegis/service.env\n"
             f"ExecStart={command}\nRestart=on-failure\nRestartSec=3\nKillMode=mixed\nTimeoutStopSec=180\n\n"
             "[Install]\nWantedBy=default.target\n")

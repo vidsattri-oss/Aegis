@@ -1,6 +1,6 @@
 [run]
 source =
-    pitcrew
+    aegis
     omni
     containers
 patch = subprocess

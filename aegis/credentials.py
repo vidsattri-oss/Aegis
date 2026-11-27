@@ -47,7 +47,7 @@ class DesktopKeyring:
     def store(self, slot, password):
         with self.operation() as (secret, schema, cancel):
             saved = secret.password_store_sync(schema, {"slot": slot}, secret.COLLECTION_DEFAULT,
-                                               "Pit Crew Harness provider credential", password, cancel)
+                                               "Aegis provider credential", password, cancel)
             require(saved, "The system keyring did not save the provider credential")
 
     def get(self, slot):

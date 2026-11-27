@@ -12,12 +12,12 @@ from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
 
-from pitcrew import demo
-from pitcrew.contracts import PERSONAS, STAGES, manifest, validate
-from pitcrew.engine import Lead, TERMINAL, model_for_role, with_model_pool
-from pitcrew.integrations import fetch_source, packages, provider_settings
-from pitcrew.repository import Repository, github_url
-from pitcrew.sandbox import ContainerCapacity, Docker, execution_plan, execution_policy, lap_profile, profile
+from aegis import demo
+from aegis.contracts import PERSONAS, STAGES, manifest, validate
+from aegis.engine import Lead, TERMINAL, model_for_role, with_model_pool
+from aegis.integrations import fetch_source, packages, provider_settings
+from aegis.repository import Repository, github_url
+from aegis.sandbox import ContainerCapacity, Docker, execution_plan, execution_policy, session_profile, profile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -123,10 +123,10 @@ class WorkspaceTest(unittest.TestCase):
         validate("lead", plan)
         policy = execution_plan(execution_policy({"overrides": {"build": {"ram": 384}}}), None)
         normal = profile("build", policy)
-        compact = lap_profile("build", policy, plan)
+        compact = session_profile("build", policy, plan)
         self.assertLess(compact["cpu"], normal["cpu"])
         self.assertEqual({**compact, "cpu": normal["cpu"]}, normal)
-        self.assertEqual(lap_profile("build", policy, plan, 2), normal)
+        self.assertEqual(session_profile("build", policy, plan, 2), normal)
         flags = Docker.args("runner", "workspace", "build", resources=compact)
         self.assertIn("--network=none", flags)
         self.assertIn("--read-only", flags)
@@ -145,7 +145,7 @@ class WorkspaceTest(unittest.TestCase):
         lead = self.lead(docker, scan=scan)
         project = lead.create_project("Release advisory check")
         sid = lead.store.session(project["id"], "Build", lead.provider())
-        with patch("pitcrew.engine.packages", return_value=coordinates):
+        with patch("aegis.engine.packages", return_value=coordinates):
             with self.assertRaisesRegex(ValueError, "Release blocked.*OSV-fixture"):
                 lead.verify(lead.get(sid), "deploy", {}, {"development": {"files": demo.FILES}},
                             {"id": None}, time.monotonic() + 3, True, profile("release"))
@@ -298,7 +298,7 @@ class WorkspaceTest(unittest.TestCase):
         self.assertIsNone(lead.get(sid)["preview"])
         self.assertTrue(lead.change_preview(sid, True))
 
-    def test_github_laps_commit_to_source_history_and_learn_from_verified_work(self):
+    def test_github_sessions_commit_to_source_history_and_learn_from_verified_work(self):
         root = Path(self.temporary.name)
         upstream = root / "upstream"
         source = root / "source"
@@ -369,7 +369,7 @@ class WorkspaceTest(unittest.TestCase):
             self.assertEqual(git(lead.repo.root, "show", commit + ":README.md").stdout, "Keep this file.\n")
             self.assertEqual(git(lead.repo.root, "show", commit + ":asset.bin", binary=True).stdout, b"\x00\xff")
             self.assertNotIn("obsolete.txt", git(lead.repo.root, "ls-tree", "-r", "--name-only", commit).stdout)
-            self.assertFalse(git(upstream, "branch", "--list", "pitcrew/*").stdout.strip())
+            self.assertFalse(git(upstream, "branch", "--list", "aegis/*").stdout.strip())
             published = lead.publish(sid)
             self.assertEqual(git(upstream, "rev-parse", published["branch"]).stdout.strip(), commit)
             self.assertEqual(git(upstream, "rev-parse", "main").stdout.strip(), base)
@@ -480,7 +480,7 @@ class WorkspaceTest(unittest.TestCase):
         lead.configure({"kind": "compatible", "endpoint": "http://127.0.0.1:8181/v1",
                         "model": "fixture", "input_rate": 2, "output_rate": 4, "api_key": "test-provider-key-value"})
         project = lead.store.project("Workshop", "")
-        unrelated = lead.store.project("Other RaceDay", "")
+        unrelated = lead.store.project("Other Project", "")
         lead.store.remember(unrelated["id"], [("decision", "Workshop Fieldwork architecture", "unrelated workspace note")])
         sid = lead.launch(project["id"], demo.PROMPT)
         result = self.completed(lead, sid)
@@ -497,7 +497,7 @@ class WorkspaceTest(unittest.TestCase):
         project = lead.store.project("CLI fixture", "")
         sid = lead.launch(project["id"], "", sample=True)
         self.assertEqual(self.completed(lead, sid)["state"], "completed")
-        common = [sys.executable, "-m", "pitcrew", "--data", self.temporary.name, "--json"]
+        common = [sys.executable, "-m", "aegis", "--data", self.temporary.name, "--json"]
         for arguments, check in [
             (["status", sid], lambda values: self.assertEqual(values["state"], "completed")),
             (["sessions", "--project", project["id"]], lambda values: self.assertEqual(values[0]["id"], sid)),

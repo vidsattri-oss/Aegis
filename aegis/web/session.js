@@ -1,6 +1,6 @@
 "use strict";
 
-const stations = [["lead", "Run plan"], ...stages];
+const stations = [["lead", "Planning"], ...stages];
 const roles = (session) => ["lead", ...stages.map(([role]) => role), "review",
   ...(session.agents.some((agent) => agent.role === "specialist") ? ["specialist"] : [])];
 const stageNames = Object.fromEntries(stations);
@@ -14,20 +14,20 @@ const eventNames = {
   capacity_wait: "Waiting for Docker capacity", execution_plan: "Docker task sizes",
   released: "Released", preview_stopped: "Preview stopped", cancelled: "Cancelled", interrupted: "Interrupted",
   delegated: "Specialist assigned", specialist_delivered: "Specialist reported", specialist_skipped: "Specialist unavailable",
-  implementation_round: "Build Crew assigned", implementation_patch: "Workstream patch validated",
+  implementation_round: "Development Team assigned", implementation_patch: "Workstream patch validated",
   implementation_reused: "Workstream patch reused", implementation_integrated: "Workstream patches integrated",
-  implementation_fallback: "Build Crew integration needs attention",
+  implementation_fallback: "Development Team integration needs attention",
   github_base: "GitHub base", github_published: "GitHub branch published",
 };
 const toolNames = {
   "model.chat": "Model", "docker.execute": "Docker", "research.fetch": "Research fetch",
-  "osv.querybatch": "Dependency scan", "preview.start": "Preview", "lead.chat": "Team Radio",
+  "osv.querybatch": "Dependency scan", "preview.start": "Preview", "lead.chat": "Lead Chat",
 };
 
 function scopeTitle({ role, stage, attempt }) {
   const agent = state.session.agents.find((item) => item.id === attempt);
   return agent ? agentName(agent) + " · attempt " + agent.number + " · " + stageNames[agent.stage]
-    : [names[role], stageNames[stage]].filter(Boolean).join(" · ") || "All lap telemetry";
+    : [names[role], stageNames[stage]].filter(Boolean).join(" · ") || "All session telemetry";
 }
 
 function matchingAgents(session, scope) {
@@ -90,7 +90,7 @@ function orgChart(session) {
     const retries = attempts.filter((agent) => agent.status === "Retried" || agent.status === "Failed").length;
     const status = running ? "Running" : attempts.at(-1)?.status;
     const title = names[role];
-    const term = { lead: "race-engineer", review: "scrutineers" }[role];
+    const term = { lead: "lead-agent", review: "reviewers" }[role];
     return scopeButton(title + ", " + attemptLabel(attempts.length), { role }, {
       ...(term && termHint(term)), class: "org-card", "data-role": role, "data-status": status || "Pending",
     }, portrait(role), node("span", { class: "org-card-text" }, node("strong", {}, title),
@@ -99,11 +99,11 @@ function orgChart(session) {
   };
   return node("section", { class: "map-section org-section", "aria-labelledby": "team-heading" },
     node("div", { class: "map-heading" }, node("div", { class: "term-label" },
-      node("h2", { id: "team-heading", tabindex: "-1" }, "Pit Crew"), termHelp("crew")),
+      node("h2", { id: "team-heading", tabindex: "-1" }, "Agents"), termHelp("crew")),
       muted(number.format(session.agents.filter((agent) => agent.status === "Running").length) + " running")),
     node("div", { class: "org-chart" },
       node("div", { class: "org-root" }, card("lead")),
-      node("ul", { class: "org-children", role: "list", "aria-label": "Crew reporting to the race engineer" },
+      node("ul", { class: "org-children", role: "list", "aria-label": "Agents reporting to the lead agent" },
         roles(session).slice(1).map((role) => node("li", {}, card(role))))));
 }
 
@@ -119,7 +119,7 @@ function factoryMap(session) {
     const touches = matchingAgents(session, { stage }).length;
     return node("th", { scope: "col", class: "rail-stop", "data-state": status },
       scopeButton(title + ", " + (labels[status] || status) + ", " + attemptLabel(touches), { stage },
-        { class: "rail-station", ...(stage === "deploy" && termHint("track-release")) },
+        { class: "rail-station", ...(stage === "deploy" && termHint("release-stage")) },
         node("span", { class: "rail-marker", "aria-hidden": "true" }),
         node("strong", {}, title), node("span", { class: "rail-state" }, labels[status] || status),
         node("small", { class: "rail-total" }, attemptLabel(touches))));
@@ -142,11 +142,11 @@ function factoryMap(session) {
   });
   return node("section", { class: "map-section factory-section", "aria-labelledby": "factory-heading" },
     node("div", { class: "map-heading" }, node("div", { class: "term-label" },
-      node("h2", { id: "factory-heading" }, "Pit Lane"), termHelp("pit-lane")),
+      node("h2", { id: "factory-heading" }, "Workflow"), termHelp("workflow")),
       muted("Attempts include retries")),
-    node("div", { class: "rail-scroll", tabindex: "0", "aria-label": "Scrollable pit lane" },
-      node("table", { class: "rail-map", "aria-label": "Crew attempts by stage" },
-        node("thead", {}, node("tr", {}, node("th", { scope: "col", class: "rail-role-head rail-corner" }, "Crew"), stops)),
+    node("div", { class: "rail-scroll", tabindex: "0", "aria-label": "Scrollable workflow" },
+      node("table", { class: "rail-map", "aria-label": "Agent attempts by stage" },
+        node("thead", {}, node("tr", {}, node("th", { scope: "col", class: "rail-role-head rail-corner" }, "Agents"), stops)),
         node("tbody", {}, lines))));
 }
 
@@ -154,7 +154,7 @@ function logInspector() {
   return node("aside", { id: "log-inspector", class: "log-inspector", "aria-labelledby": "log-heading" },
     node("div", { class: "map-heading" }, node("div", { class: "term-label" },
       node("h2", { id: "log-heading", tabindex: "-1" }, "Telemetry"), termHelp("telemetry")),
-      actions(button("Pit Lane ↑", jumpToMap, "quiet log-back"),
+      actions(button("Workflow ↑", jumpToMap, "quiet log-back"),
         button("Reset filter", () => selectScope({}), "quiet log-reset"))),
     node("div", { id: "log-scope", class: "log-scope", role: "status" }),
     node("div", { id: "log-context" }),
@@ -165,7 +165,7 @@ function mapPanel(session) {
   return node("div", { class: "operations" },
     node("div", { class: "map-stack" },
       node("div", { class: "map-tools" }, node("span", { class: "session-signal", "data-state": session.state },
-        node("i", { "aria-hidden": "true" }), ["queued", "running"].includes(session.state) ? "Updating live" : "Lap activity"),
+        node("i", { "aria-hidden": "true" }), ["queued", "running"].includes(session.state) ? "Updating live" : "Session activity"),
         button("View telemetry ↓", jumpToLogs, "quiet log-jump")),
       orgChart(session), factoryMap(session)), logInspector());
 }
@@ -318,7 +318,7 @@ async function loadTelemetry(older = false) {
 
 function sessionPage(session) {
   const panels = { map: mapPanel, summary: summaryPanel, output: outputPanel };
-  const tabTerms = { map: "pit-lane", summary: "debrief", output: "parc-ferme" };
+  const tabTerms = { map: "workflow", summary: "debrief", output: "release" };
   const changeTab = (id, focus = false) => {
     state.tab = id;
     for (const tab of $("#session-tabs").querySelectorAll("[role=tab]")) {
@@ -334,7 +334,7 @@ function sessionPage(session) {
     panel.replaceChildren(...[panels[id](state.session)].flat(Infinity).filter(Boolean));
     if (id === "map") { renderLogPanel(); loadTelemetry(); }
   };
-  const tabs = node("div", { class: "tabs", role: "tablist", id: "session-tabs", "aria-label": "Lap views",
+  const tabs = node("div", { class: "tabs", role: "tablist", id: "session-tabs", "aria-label": "Session views",
     onkeydown: (event) => {
       const current = tabNames.findIndex(([id]) => id === state.tab);
       const last = tabNames.length - 1;
@@ -350,13 +350,13 @@ function sessionPage(session) {
     await refresh(true);
   }, event);
   const active = ["queued", "running"].includes(session.state);
-  return [heading(limit(session.plan?.summary || session.prompt, 95), "Lap " + session.id.slice(0, 8),
+  return [heading(limit(session.plan?.summary || session.prompt, 95), "Session " + session.id.slice(0, 8),
     actions(badge(session.state), active ? button("Cancel", control("cancel"), "quiet danger")
-      : session.state === "budget_paused" ? button("Resume lap", control("retry"), "quiet")
+      : session.state === "budget_paused" ? button("Resume session", control("retry"), "quiet")
       : ["failed", "cancelled"].includes(session.state) && button("Retry", control("retry"), "quiet"),
-      !active && button("New lap", () => startSession(session.project_id), "quiet")), "session-heading"),
+      !active && button("New session", () => startSession(session.project_id), "quiet")), "session-heading"),
     session.state === "budget_paused" && node("p", { class: "notice", role: "status" }, session.error),
-    node("section", { class: "inspection", "aria-label": "Lap views" }, tabs,
+    node("section", { class: "inspection", "aria-label": "Session views" }, tabs,
       node("div", { id: "session-panel", class: "tab-content" + (state.tab === "map" ? " map-panel" : ""),
         role: "tabpanel", "aria-labelledby": "tab-" + state.tab }, panels[state.tab](session)))];
 }
@@ -368,14 +368,14 @@ function syncLeadChat(session) {
     root.dataset.session = session.id;
     root.dataset.lastRead = session.messages.at(-1)?.id || 0;
     delete root.dataset.lastRendered;
-    const launcher = node("button", { ...termHint("team-radio"), type: "button", class: "chat-launcher", "aria-expanded": "false",
-      "aria-controls": "lead-drawer" }, portrait("lead"), "Team Radio", node("span", { class: "chat-unread", hidden: true }));
-    const messages = node("div", { class: "messages", role: "log", "aria-label": "Team radio conversation" });
-    const input = node("input", { name: "message", "aria-label": "Message the race engineer",
-      placeholder: "Ask the race engineer…", required: true, maxlength: 4000 });
+    const launcher = node("button", { ...termHint("lead-chat"), type: "button", class: "chat-launcher", "aria-expanded": "false",
+      "aria-controls": "lead-drawer" }, portrait("lead"), "Lead Chat", node("span", { class: "chat-unread", hidden: true }));
+    const messages = node("div", { class: "messages", role: "log", "aria-label": "Lead chat conversation" });
+    const input = node("input", { name: "message", "aria-label": "Message the lead agent",
+      placeholder: "Ask the lead agent…", required: true, maxlength: 4000 });
     const send = node("button", { type: "submit", class: "button primary" }, "Send");
-    const note = node("button", { type: "submit", class: "button quiet radio-note", title: "Send guidance to the next crew handoff" }, "Crew note");
-    const pending = node("p", { class: "muted radio-pending", role: "status", hidden: true }, "Waiting for the race engineer…");
+    const note = node("button", { type: "submit", class: "button quiet radio-note", title: "Send guidance to the next agent handoff" }, "Session note");
+    const pending = node("p", { class: "muted radio-pending", role: "status", hidden: true }, "Waiting for the lead agent…");
     const draft = node("form", { class: "chat-draft", onsubmit: async (event) => {
       event.preventDefault();
       const message = input.value.trim();
@@ -390,8 +390,8 @@ function syncLeadChat(session) {
       finally { send.disabled = false; note.disabled = false; }
     } }, input, send, note);
     const drawer = node("section", { id: "lead-drawer", class: "lead-drawer", "aria-labelledby": "lead-title", hidden: true },
-      node("header", { class: "chat-header" }, portrait("lead"), node("h2", { id: "lead-title" }, "Team Radio"),
-        node("button", { type: "button", class: "close", "aria-label": "Minimize team radio",
+      node("header", { class: "chat-header" }, portrait("lead"), node("h2", { id: "lead-title" }, "Lead Chat"),
+        node("button", { type: "button", class: "close", "aria-label": "Minimize lead chat",
           onclick: () => toggle(false) }, "×")), messages, pending, draft);
     const toggle = (open) => {
       drawer.hidden = !open;
@@ -421,7 +421,7 @@ function syncLeadChat(session) {
   const position = messages.scrollTop;
   const appended = session.messages.filter((message) => message.id > Number(root.dataset.lastRendered || 0));
   messages.append(...appended.map((message) => node("div", { class: "message " + message.speaker },
-    muted((message.speaker === "lead" ? "Race Engineer" : "You") + " · " + timestamp(message.created)), node("p", {}, message.text))));
+    muted((message.speaker === "lead" ? "Lead Agent" : "You") + " · " + timestamp(message.created)), node("p", {}, message.text))));
   messages.scrollTop = follow ? messages.scrollHeight : position;
   root.dataset.lastRendered = last;
   if (isOpen) root.dataset.lastRead = last;
@@ -447,7 +447,7 @@ function renderWorkspace() {
   }
   if (active?.id?.startsWith("tab-") || active?.id === "log-heading") document.getElementById(active.id)?.focus({ preventScroll: true });
   if (active?.classList.contains("term-help") && !active.isConnected) {
-    main.querySelector('.term-help[data-f1-term="' + active.dataset.f1Term + '"]')?.focus({ preventScroll: true });
+    main.querySelector('.term-help[data-help-term="' + active.dataset.helpTerm + '"]')?.focus({ preventScroll: true });
   }
   if (active?.dataset.filter !== undefined) {
     const candidates = [...main.querySelectorAll('[data-filter="' + active.dataset.filter + '"]')];

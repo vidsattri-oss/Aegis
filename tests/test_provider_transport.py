@@ -7,8 +7,8 @@ from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock, patch
 
-from pitcrew import integrations
-from pitcrew.mcp import Client, VERSION
+from aegis import integrations
+from aegis.mcp import Client, VERSION
 
 
 class ModelHandler(BaseHTTPRequestHandler):
@@ -49,12 +49,12 @@ class ProviderTransportTest(unittest.TestCase):
         server.stop_reason = "stop"
         self.assertEqual(integrations.list_provider_models(settings, "")["models"],
                          [{"id": "alpha", "owned_by": "Fixture"}, {"id": "zeta", "owned_by": ""}])
-        response, tokens = integrations.complete(settings, "test-credential", "Summarize", {"request": "Plan a lap"}, 3)
+        response, tokens = integrations.complete(settings, "test-credential", "Summarize", {"request": "Plan a session"}, 3)
         self.assertEqual(json.loads(response), {"summary": "Ready"})
         self.assertEqual(tokens, (12, 6))
         self.assertEqual(server.authorization, "Bearer test-credential")
         self.assertEqual(server.prompt["model"], "alpha")
-        self.assertEqual(json.loads(server.prompt["messages"][1]["content"]), {"request": "Plan a lap"})
+        self.assertEqual(json.loads(server.prompt["messages"][1]["content"]), {"request": "Plan a session"})
         server.stop_reason = "length"
         with self.assertRaisesRegex(RuntimeError, "stopped with length"):
             integrations.complete(settings, "", "Summarize", {}, 3)

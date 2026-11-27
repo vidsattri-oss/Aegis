@@ -8,9 +8,9 @@ from zipfile import ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pitcrew import demo
-from pitcrew.engine import Lead, TERMINAL
-from pitcrew.sandbox import Docker
+from aegis import demo
+from aegis.engine import Lead, TERMINAL
+from aegis.sandbox import Docker
 
 
 class RepairSmokeLead(Lead):
@@ -25,7 +25,7 @@ class RepairSmokeLead(Lead):
 def main():
     Docker().doctor()
     # Docker Desktop only shares configured host paths with its VM.
-    with tempfile.TemporaryDirectory(prefix=".pitcrew-smoke-", dir=Path.cwd()) as scratch:
+    with tempfile.TemporaryDirectory(prefix=".aegis-smoke-", dir=Path.cwd()) as scratch:
         lead = RepairSmokeLead(Path(scratch))
         try:
             project = lead.store.project("Real Docker smoke test", "")

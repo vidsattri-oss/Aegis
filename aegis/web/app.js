@@ -1,34 +1,34 @@
 "use strict";
 
 const $ = (selector) => document.querySelector(selector);
-const stages = [["research", "Strategy"], ["architecture", "Technical Design"], ["design", "Experience Design"],
-  ["development", "Build"], ["qa", "Systems Test"], ["deploy", "Track Release"]];
-const names = { ...Object.fromEntries(stages), lead: "Race Engineer", development: "Build Crew",
-  qa: "Test Engineer", deploy: "Trackside Ops", review: "Scrutineers", specialist: "Specialists" };
-const labels = { queued: "Queued", running: "Running", retrying: "Retried", completed: "Healthy",
+const stages = [["research", "Research"], ["architecture", "Architecture"], ["design", "Design"],
+  ["development", "Development"], ["qa", "Testing"], ["deploy", "Release"]];
+const names = { ...Object.fromEntries(stages), lead: "Lead Agent", development: "Developer",
+  qa: "QA Engineer", deploy: "Release Engineer", review: "Reviewers", specialist: "Specialists" };
+const labels = { queued: "Queued", running: "Running", retrying: "Retried", completed: "Completed",
   failed: "Failed", cancelled: "Cancelled", budget_paused: "Budget paused", paused: "Paused",
   passed: "Passed", ready: "Ready", pending: "Pending" };
 const state = { workspace: null, project: null, session: null, route: "", tab: "map",
   engine: null, csrf: "", refreshing: false, toast: null, scope: {}, telemetry: null, signature: "" };
-const tabNames = [["map", "Crew & Pit Lane"], ["summary", "Lap Debrief"], ["output", "Parc Fermé"]];
-const f1Terms = {
-  "pit-wall": ["Pit Wall", "Your workspace. It contains RaceDays and shows crew activity across their laps."],
-  raceday: ["RaceDay", "A software project inside a Pit Wall. It keeps the source code, build history, and laps together."],
-  lap: ["Lap", "A build session in a RaceDay, from the request through implementation, testing, and approval."],
-  "practice-run": ["Practice run", "A built-in demo that builds the Fieldwork app using bundled responses. It needs Docker and works without a model API key."],
-  crew: ["Pit Crew", "The group of specialist agents that plans, builds, tests, and reviews your software."],
-  "race-engineer": ["Race Engineer", "The lead agent. It turns your request into a plan and coordinates the specialist agents."],
-  scrutineers: ["Scrutineers", "Independent reviewers who check the work and the test evidence before each stage can pass."],
-  "pit-lane": ["Pit Lane", "The map of build stages. Select a stage or an agent to see its progress and execution details."],
-  debrief: ["Lap Debrief", "A report with the original request, the plan, the acceptance criteria, and the decisions made during the run."],
-  "parc-ferme": ["Parc Fermé", "Where you download the approved build or launch its sandbox preview after the required checks pass."],
+const tabNames = [["map", "Workflow"], ["summary", "Session Summary"], ["output", "Release"]];
+const helpTerms = {
+  "workspace": ["Workspace", "Shows all projects, recent sessions, and running agents for your account."],
+  project: ["Project", "Groups a repository, budget, and session history."],
+  session: ["Session", "Tracks one request from the plan through implementation, testing, and release."],
+  "demo": ["Demo", "A built-in demo that builds the Fieldwork app using bundled responses. It needs Docker and works without a model API key."],
+  crew: ["Agents", "The group of specialist agents that plans, builds, tests, and reviews your software."],
+  "lead-agent": ["Lead Agent", "The lead agent. It turns your request into a plan and coordinates the specialist agents."],
+  reviewers: ["Reviewers", "Independent reviewers who check the work and the test evidence before each stage can pass."],
+  "workflow": ["Workflow", "Select a development stage or agent to see its progress and execution log."],
+  debrief: ["Session Summary", "A report with the original request, the plan, the acceptance criteria, and the decisions made during the run."],
+  "release": ["Release", "Where you download the approved build or launch its sandbox preview after the required checks pass."],
   telemetry: ["Telemetry", "The event log for a build run, including tool calls, test results, and approvals."],
-  "team-radio": ["Team Radio", "Chat with the lead agent about the current build run."],
-  "power-unit": ["Power Unit", "Settings for the AI model provider and the models assigned to each agent."],
-  "pit-setup": ["Pit Setup", "Settings for Docker resources, how many runs can work in parallel, and local readiness checks."],
-  toolbox: ["Toolbox", "Where you configure the Skills and MCP tools that agents can use."],
-  "setup-book": ["Setup Book", "Saved decisions, fixes, and verified patterns the crew can reuse on later runs."],
-  "track-release": ["Track Release", "The stage that packages the tested source and makes the approved build available."],
+  "lead-chat": ["Lead Chat", "Chat with the lead agent about the current build run."],
+  "model-provider": ["Model Provider", "Settings for the AI model provider and the models assigned to each agent."],
+  "execution": ["Execution", "Settings for Docker resources, how many runs can work in parallel, and local readiness checks."],
+  toolbox: ["Skills & Tools", "Where you configure the Skills and MCP tools that agents can use."],
+  "memory": ["Memory", "Saved decisions, fixes, and verified patterns the agents can reuse on later runs."],
+  "release-stage": ["Release", "The stage that packages the tested source and makes the approved build available."],
 };
 const number = new Intl.NumberFormat();
 const money = (value) => "$" + Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 5, minimumFractionDigits: 2 });
@@ -62,17 +62,17 @@ const list = (items) => node("ul", { class: "criteria" }, items.map((item) => no
 const facts = (pairs) => node("dl", { class: "facts" }, pairs.map(([name, value]) =>
   [node("dt", {}, name), node("dd", {}, value ?? "—")]));
 
-const termHint = (term) => ({ "data-f1-term": term, "aria-describedby": "f1-term-" + term });
+const termHint = (term) => ({ "data-help-term": term, "aria-describedby": "help-term-" + term });
 
 function termHelp(term) {
   return node("button", { ...termHint(term), type: "button", class: "term-help",
-    "aria-label": "About " + f1Terms[term][0] }, node("span", { "aria-hidden": "true" }, "?"));
+    "aria-label": "About " + helpTerms[term][0] }, node("span", { "aria-hidden": "true" }, "?"));
 }
 
 function setupTermHelp() {
   const tooltip = node("div", { class: "term-tooltip", "aria-hidden": "true", hidden: true });
-  document.body.append(tooltip, node("div", { hidden: true }, Object.entries(f1Terms).map(([term, [, definition]]) =>
-    node("span", { id: "f1-term-" + term }, definition))));
+  document.body.append(tooltip, node("div", { hidden: true }, Object.entries(helpTerms).map(([term, [, definition]]) =>
+    node("span", { id: "help-term-" + term }, definition))));
   let target;
   let pinned = false;
   let timer;
@@ -102,7 +102,7 @@ function setupTermHelp() {
     clearTimeout(timer);
     target = trigger;
     pinned = stick;
-    tooltip.textContent = f1Terms[trigger.dataset.f1Term][1];
+    tooltip.textContent = helpTerms[trigger.dataset.helpTerm][1];
     tooltip.hidden = false;
     position();
   }
@@ -115,7 +115,7 @@ function setupTermHelp() {
     }, 150);
   }
 
-  const triggerFor = (event) => event.target.closest("[data-f1-term]");
+  const triggerFor = (event) => event.target.closest("[data-help-term]");
   document.addEventListener("pointerover", (event) => {
     const trigger = triggerFor(event);
     if (trigger && event.pointerType !== "touch" && (!pinned || target === trigger)) {
@@ -176,12 +176,12 @@ function notify(text) {
 
 async function api(path, body) {
   const options = body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Pitcrew-Token": state.csrf },
+    method: "POST", headers: { "Content-Type": "application/json", "X-Aegis-Token": state.csrf },
     body: JSON.stringify(body),
   };
   const response = await fetch(path, options);
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "Pit Wall request failed");
+  if (!response.ok) throw new Error(result.error || "Workspace request failed");
   return result;
 }
 
@@ -204,17 +204,17 @@ function renderSidebar(current) {
     { ...(term && termHint(term)), href, class: "nav-link" + (selected ? " selected" : ""),
       "aria-current": selected ? "location" : null },
     node("span", { class: "nav-icon", "aria-hidden": "true" }, icon), label);
-  $("#navigation").replaceChildren(link("Pit Wall", "⌂", "#workspace", !current.project, "pit-wall"),
-    node("span", { class: "nav-title" }, "RaceDays"),
+  $("#navigation").replaceChildren(link("Workspace", "⌂", "#workspace", !current.project, "workspace"),
+    node("span", { class: "nav-title" }, "Projects"),
     ...state.workspace.projects.map((project) => link(project.name, "◇", projectURL(project.id), current.project === project.id)));
-  const crumbs = [node("a", { href: "#workspace" }, "Pit Wall")];
+  const crumbs = [node("a", { href: "#workspace" }, "Workspace")];
   if (state.project) {
     crumbs.push(node("span", { class: "separator", "aria-hidden": "true" }, "/"));
     crumbs.push(current.session ? node("a", { href: projectURL(current.project) }, state.project.project.name)
       : node("span", { class: "breadcrumb-current", "aria-current": "page" }, state.project.project.name));
   }
   if (state.session) crumbs.push(node("span", { class: "separator", "aria-hidden": "true" }, "/"),
-    node("span", { class: "breadcrumb-current", "aria-current": "page" }, "Lap " + state.session.id.slice(0, 8)));
+    node("span", { class: "breadcrumb-current", "aria-current": "page" }, "Session " + state.session.id.slice(0, 8)));
   $("#breadcrumbs").replaceChildren(...crumbs);
 }
 
@@ -263,17 +263,17 @@ function formDialog(title, fields, submitText, submit, wide = false) {
 }
 
 function newProject() {
-  formDialog("New RaceDay", [
-    field("RaceDay name", node("input", { name: "name", placeholder: "Customer portal", required: true, maxlength: 100 })),
+  formDialog("New Project", [
+    field("Project name", node("input", { name: "name", placeholder: "Customer portal", required: true, maxlength: 100 })),
     field("Description", node("textarea", { name: "description", rows: 3, maxlength: 1000 })),
     field("GitHub repository (optional)", node("input",
       { name: "github_url", type: "url", placeholder: "https://github.com/owner/repo", maxlength: 240 })),
     field("GitHub branch (optional)", node("input",
       { name: "github_branch", placeholder: "Repository default branch", maxlength: 200 })),
-    muted("The crew reads relevant source from the selected repository using your configured model provider."),
-  ], "Create RaceDay", async (data) => {
-    if (data.github_url.trim() && !state.workspace.capabilities?.github_racedays) {
-      throw new Error("Restart the Pit Wall server to connect a GitHub repository.");
+    muted("Aegis reads relevant source from the selected repository using your configured model provider."),
+  ], "Create Project", async (data) => {
+    if (data.github_url.trim() && !(state.workspace.capabilities?.github_projects ?? state.workspace.capabilities?.github_racedays)) {
+      throw new Error("Restart the Workspace server to connect a GitHub repository.");
     }
     const project = await api("/api/projects", data);
     location.hash = projectURL(project.id);
@@ -381,7 +381,7 @@ function settings() {
   const cliModel = node("input", { name: "model", placeholder: "Use the CLI default",
     value: cliProviders.includes(provider.kind) ? provider.model : "" });
   const cliSettings = node("div", { class: "fields", hidden: true },
-    muted("Install and sign in to the selected CLI on the machine running Pit Crew Harness. Use /setup in the terminal for guidance."),
+    muted("Install and sign in to the selected CLI on the machine running Aegis. Use /setup in the terminal for guidance."),
     field("Model ID (optional)", cliModel));
   const configure = () => {
     const kind = type.value;
@@ -443,12 +443,12 @@ function settings() {
       const result = await api("/api/provider/test", {});
       notify("Model responded · " + result.model);
     }, event), "quiet"));
-  const form = formDialog("Power Unit", [field("Provider", type), connected, cliSettings, advanced], "Save settings", async (data) => {
+  const form = formDialog("Model Provider", [field("Provider", type), connected, cliSettings, advanced], "Save settings", async (data) => {
     for (const field of ["input_rate", "output_rate", "compute_rate"]) data[field] = Number(data[field]);
     for (const field of ["remember_key", "forget_key", "clear_key"]) data[field] = Boolean(data[field]);
     if (type.value === "foundry" && model.disabled) data.role_models = roleModels();
     state.workspace.provider = await api("/api/provider", data);
-    notify(state.workspace.provider.deployments ? "Foundry deployments saved for workspace agents." : "Power Unit settings saved.");
+    notify(state.workspace.provider.deployments ? "Foundry deployments saved for workspace agents." : "Model Provider settings saved.");
     await refresh(true);
   });
   form.classList.add("provider-settings-form");
@@ -470,7 +470,7 @@ function livePressure() {
         ["Reserved here", resources(reserved)],
         ["Other Docker containers", external ? `${external.containers} running · ${resources(external)}` : "Usage unavailable"],
       ]), holds.length ? list(holds.map((hold) =>
-        `Lap ${hold.session_id.slice(0, 8)} · ${stageNames[hold.stage] || hold.stage} · ${hold.tasks.join(", ")} · ${resources(hold)}`))
+        `Session ${hold.session_id.slice(0, 8)} · ${stageNames[hold.stage] || hold.stage} · ${hold.tasks.join(", ")} · ${resources(hold)}`))
         : muted("No tasks hold capacity in this workspace."));
     } catch (error) {
       body.replaceChildren(node("p", { class: "error-text" }, error.message));
@@ -533,18 +533,18 @@ async function executionSettings(event) {
       node("thead", {}, node("tr", {}, ["Task", "Sizing", ...columns.map((column) => column[1])]
         .map((label) => node("th", { scope: "col" }, label)))),
       node("tbody", {}, rows.map(({ row }) => row))));
-    formDialog("Pit Setup", [
+    formDialog("Execution", [
       muted(capacity ? `Docker engine capacity · ${number.format(capacity.cpu)} CPU cores · ${number.format(capacity.ram)} MiB`
         : "Docker is unavailable. The table shows reference sizes."),
       localPreflight(), livePressure(),
-      field("Concurrent laps across RaceDays", node("input", { name: "sessions", type: "number", required: true,
+      field("Concurrent sessions across Projects", node("input", { name: "sessions", type: "number", required: true,
         min: 1, max: 8, value: policy.sessions })),
       Object.hasOwn(policy, "adaptive_sessions") && node("label", { class: "checkbox" },
         node("input", { name: "adaptive_sessions", type: "checkbox", checked: policy.adaptive_sessions }),
-        ` Adapt concurrent laps to Docker capacity · current limit ${policy.effective_sessions}`),
+        ` Adapt concurrent sessions to Docker capacity · current limit ${policy.effective_sessions}`),
       Object.hasOwn(policy, "deep_research") && node("label", { class: "checkbox" },
         node("input", { name: "deep_research", type: "checkbox", checked: policy.deep_research }),
-        " Autoresearch Beast Mode · up to six evidence rounds per attempt"),
+        " Deep Research · up to six evidence rounds per attempt"),
       Object.hasOwn(policy, "model_slots") && field("Maximum simultaneous model requests", node("input",
         { name: "model_slots", type: "number", required: true, min: 1, max: 8, value: policy.model_slots })),
       node("label", { class: "checkbox" }, node("input", { name: "parallel_reviews", type: "checkbox", checked: policy.parallel_reviews }),
@@ -563,7 +563,7 @@ async function executionSettings(event) {
       }
       if (Object.hasOwn(policy, "model_slots")) settings.model_slots = Number(data.model_slots);
       await api("/api/execution", settings);
-      notify("Pit setup saved.");
+      notify("Execution settings saved.");
     }, true);
   }, event);
 }
@@ -579,10 +579,10 @@ function startSession(project, sample = false) {
     settings();
     return;
   }
-  formDialog("New lap", [
-    field("Brief for the race engineer", node("textarea", { rows: 7, name: "prompt", required: true, maxlength: 16000,
+  formDialog("New session", [
+    field("Brief for the lead agent", node("textarea", { rows: 7, name: "prompt", required: true, maxlength: 16000,
       placeholder: "Describe the software, constraints, and what should work when it’s ready." })),
-  ], "Start lap", create);
+  ], "Start session", create);
 }
 
 async function perform(operation, event) {
@@ -597,34 +597,34 @@ function workspacePage() {
   const deployments = provider.deployments?.filter(({ chat }) => chat !== false) || [];
   const sum = (key) => projects.reduce((total, project) => total + project[key], 0);
   const projectCards = projects.map((project) => node("a", { class: "project-card", href: projectURL(project.id) },
-    node("div", { class: "card-heading" }, node("strong", {}, project.name), badge(project.health, project.health ? null : "No laps")),
+    node("div", { class: "card-heading" }, node("strong", {}, project.name), badge(project.health, project.health ? null : "No sessions")),
     project.description && node("p", { class: "muted" }, limit(project.description)),
-    node("div", { class: "row-meta" }, muted(number.format(project.session_count) + (project.session_count === 1 ? " lap" : " laps")), muted(money(project.model_cost + project.compute_cost)))));
-  return [heading("Pit Wall", "Manage RaceDays and follow each build from lap brief to approval.",
-    actions(button("+ New RaceDay", newProject, "primary"))),
-    node("div", { class: "metric-grid" }, metric("RaceDays", number.format(projects.length), null, "raceday"),
-      metric("Laps", number.format(sum("session_count")), null, "lap"), metric("Active crew", number.format(sum("active_agents")),
+    node("div", { class: "row-meta" }, muted(number.format(project.session_count) + (project.session_count === 1 ? " session" : " sessions")), muted(money(project.model_cost + project.compute_cost)))));
+  return [heading("Workspace", "Manage Projects and follow each build from session brief to approval.",
+    actions(button("+ New Project", newProject, "primary"))),
+    node("div", { class: "metric-grid" }, metric("Projects", number.format(projects.length), null, "project"),
+      metric("Sessions", number.format(sum("session_count")), null, "session"), metric("Active agents", number.format(sum("active_agents")),
         number.format(sum("failed_agents")) + " failed attempts"), metric("Estimated spend", money(sum("model_cost") + sum("compute_cost")),
         number.format(sum("tokens")) + " provider tokens")),
     deployments.length > 0 && node("section", { class: "panel card-heading workspace-models" },
       node("div", {}, node("h2", {}, "Power units"),
         muted(`${number.format(deployments.length)} Foundry ${deployments.length === 1 ? "deployment" : "deployments"} available to agents`)),
       button("Manage models", settings, "quiet")),
-    sectionHeading("RaceDays"),
+    sectionHeading("Projects"),
     projects.length ? node("div", { class: "project-grid" }, projectCards)
-      : node("div", { class: "empty" }, node("h3", {}, "Create your first RaceDay"),
-        node("p", { class: "muted" }, "Send the race engineer a brief or try the Fieldwork practice run."),
-        button("Create RaceDay", newProject)),
-    node("section", { class: "panel" }, sectionHeading("Setup Book", button("Open setup book", showDreaming, "quiet")),
+      : node("div", { class: "empty" }, node("h3", {}, "Create your first Project"),
+        node("p", { class: "muted" }, "Send the lead agent a brief or try the Fieldwork demo."),
+        button("Create Project", newProject)),
+    node("section", { class: "panel" }, sectionHeading("Memory", button("Open setup book", showDreaming, "quiet")),
     node("div", { class: "hive" }, [[memory.nodes, "Knowledge nodes"], [memory.links, "Graph links"],
       [memory.applications, "Successful applications"], [memory.agent_playbooks ?? 0, "Agent playbooks"]].map(([value, text]) =>
       node("div", {}, node("strong", {}, number.format(value)), muted(text)))),
-    muted(memory.last_dream ? "Last consolidated " + timestamp(memory.last_dream.at) : "The crew consolidates its notes between laps."))];
+    muted(memory.last_dream ? "Last consolidated " + timestamp(memory.last_dream.at) : "Aegis consolidates notes between sessions."))];
 }
 
 function editBudget(project, budget) {
   formDialog("Model budget", [
-    field("RaceDay limit in USD", node("input", { name: "budget_usd", type: "number", min: 0, max: 1000000, step: 0.01,
+    field("Project limit in USD", node("input", { name: "budget_usd", type: "number", min: 0, max: 1000000, step: 0.01,
       value: budget.budget_usd ?? "" })),
     muted("Leave blank for unlimited spending. Set zero to stop new model requests. Work already sent to the provider can still incur a charge."),
   ], "Save budget", async ({ budget_usd }) => {
@@ -650,7 +650,7 @@ function editAzureRates(provider) {
     field("Azure region code", node("input", { name: "region", placeholder: "eastus" })),
     field("Uncached input token meter ID", node("input", { name: "input_meter" })),
     field("Output token meter ID", node("input", { name: "output_meter" })),
-    muted("Choose meters for the deployed model and SKU. Pit Crew reads public Azure retail prices in USD."),
+    muted("Choose meters for the deployed model and SKU. Aegis reads public Azure retail prices in USD."),
     node("label", { class: "checkbox" }, node("input", { name: "clear", type: "checkbox" }), " Clear saved rates for this deployment"),
   ], "Save pricing", async ({ model, region, input_meter, output_meter, clear }) => {
     const { rates } = await api("/api/provider/azure-prices", {
@@ -668,21 +668,21 @@ function projectPage() {
   const azurePrices = budget && ["foundry", "azure-gateway"].includes(provider.kind)
     && (provider.model || provider.deployments?.length);
   return [heading(project.name, project.description, actions(!project.github_url &&
-    button("Start practice run", () => startSession(project.id, true), "quiet", "practice-run"),
-    button("+ New lap", () => startSession(project.id), "primary"))),
+    button("Start demo", () => startSession(project.id, true), "quiet", "demo"),
+    button("+ New session", () => startSession(project.id), "primary"))),
     project.github_url && node("p", { class: "muted" }, "GitHub repository · ",
       node("a", { href: project.github_url, target: "_blank", rel: "noopener noreferrer" }, project.github_url.replace(/\.git$/, "")),
       project.github_branch && " · " + project.github_branch),
     state.engine && !state.engine.ready && node("p", { class: "notice" }, state.engine.detail),
-    sectionHeading("RaceDay overview", actions(budget && button("Model budget", () => editBudget(project, budget), "quiet"),
+    sectionHeading("Project overview", actions(budget && button("Model budget", () => editBudget(project, budget), "quiet"),
       azurePrices && button("Azure model rates", () => editAzureRates(provider), "quiet"))),
     node("div", { class: "metric-grid" },
-      metric("Laps", number.format(vitals.session_count)),
+      metric("Sessions", number.format(vitals.session_count)),
       metric("Estimated spend", money(vitals.model_cost + vitals.compute_cost),
         money(vitals.model_cost) + " model · " + money(vitals.compute_cost) + " compute"),
-      metric("Active crew", number.format(vitals.active_agents), number.format(vitals.failed_agents) + " failed attempts"),
+      metric("Active agents", number.format(vitals.active_agents), number.format(vitals.failed_agents) + " failed attempts"),
       metric("Build health", labels[vitals.health] || "Idle", number.format(vitals.tokens) + " total tokens")),
-    budget && node("section", { class: "panel", "aria-label": "RaceDay model budget" },
+    budget && node("section", { class: "panel", "aria-label": "Project model budget" },
       facts([
         ["Model spend", money(budget.model_cost)],
         ["Vendor charges", money(budget.vendor_cost)],
@@ -693,15 +693,15 @@ function projectPage() {
       ]),
       budget.unpriced_calls > 0 && muted(`${number.format(budget.unpriced_calls)} model calls lacked complete pricing data.`),
       (budget.reached || budget.budget_hold) && node("p", { class: "notice" }, budget.budget_hold ||
-        "Model budget reached. Update the budget before resuming a paused Lap.")),
-    sectionHeading("Laps", null, "lap"),
+        "Model budget reached. Update the budget before resuming a paused Session.")),
+    sectionHeading("Sessions", null, "session"),
     sessions.length ? node("div", { class: "session-list" }, sessions.map((session) =>
       node("a", { class: "session-row", href: sessionURL(project.id, session.id) },
         node("div", {}, node("strong", {}, limit(session.prompt)),
           muted(timestamp(session.created) + " · " + (stageNames[session.stage] || session.stage))),
         badge(session.state))))
-      : node("div", { class: "empty" }, node("h3", {}, "No laps yet"),
-        node("p", { class: "muted" }, "Start a lap to send the race engineer your brief."))];
+      : node("div", { class: "empty" }, node("h3", {}, "No sessions yet"),
+        node("p", { class: "muted" }, "Start a session to send the lead agent your brief."))];
 }
 
 function summaryPanel(session) {
@@ -709,8 +709,8 @@ function summaryPanel(session) {
   return [facts([["Branch", code(session.branch)], ["Status", badge(session.state)],
     ["Estimated cost", money(session.cost)], ["Provider tokens", number.format(session.tokens)]]),
     session.error && node("p", { class: "error-text" }, session.error),
-    node("h3", {}, "Lap brief"), node("p", {}, session.prompt),
-    session.plan && [node("h3", {}, "Run plan"), node("p", { class: "muted" }, session.plan.summary),
+    node("h3", {}, "Session brief"), node("p", {}, session.prompt),
+    session.plan && [node("h3", {}, "Planning"), node("p", { class: "muted" }, session.plan.summary),
       list(stages.map(([id, name]) => name + " · " + session.plan.stages[id])),
       node("h3", {}, "Acceptance criteria"), list(session.plan.criteria.map((item) => item.id + " · " + item.description))],
     decisions.length > 0 && [node("h3", {}, "Decisions"), list(decisions)]];
@@ -765,14 +765,14 @@ function previewPanel(session) {
 
 function outputPanel(session) {
   if (session.state !== "completed") return node("div", { class: "empty" }, node("h3", {}, "Build pending"),
-    node("p", { class: "muted" }, "Parc Fermé opens after the crew clears every check."));
+    node("p", { class: "muted" }, "Release opens after the agents clears every check."));
   const isWeb = session.gates.find((gate) => gate.stage === "architecture")?.artifact?.mode === "web";
   const release = session.gates.find((gate) => gate.stage === "deploy");
   const security = release?.details?.evidence?.security_review;
   const inspections = (release?.details?.reviews || []).map(({ review }) => review.security).filter(Boolean);
   const securityPanel = security && node("section", { class: "preview-card", "aria-label": "Release security review" },
     node("h3", {}, "Security review"),
-    muted((security.mode === "practice" ? "Practice verdict" : "Reviewed " + timestamp(security.checked_at)) + " · " +
+    muted((security.mode === "practice" ? "Demo verdict" : "Reviewed " + timestamp(security.checked_at)) + " · " +
       (security.dependencies.scanned ? number.format(security.dependencies.scanned) + " pinned dependencies checked" :
         "No pinned dependencies")),
     list(inspections.flatMap(({ checks }) => checks)),
@@ -791,9 +791,9 @@ function outputPanel(session) {
       node("h3", {}, "GitHub commit"), code(session.github_commit),
       actions(session.github_published
         ? node("a", { class: "button quiet", href: remote + "/tree/" + session.github_published,
-          target: "_blank", rel: "noopener noreferrer" }, "Open lap branch")
-        : button("Push lap branch to GitHub", publish, "quiet"))),
-    node("div", { class: "term-label" }, node("h3", {}, "Approved build"), termHelp("parc-ferme")),
+          target: "_blank", rel: "noopener noreferrer" }, "Open session branch")
+        : button("Push session branch to GitHub", publish, "quiet"))),
+    node("div", { class: "term-label" }, node("h3", {}, "Approved build"), termHelp("release")),
     session.bundle && anchor("Download build", "/api/sessions/" + session.id + "/build"),
     session.bundle && node("code", { class: "output-path" }, session.bundle),
     list(release?.artifact?.instructions || []), securityPanel];
@@ -853,13 +853,12 @@ document.addEventListener("DOMContentLoaded", () => {
     $(".skip").remove();
     $(".shell").replaceWith(node("main", {},
       node("section", { class: "empty" },
-        node("h1", {}, "Open Pit Wall"),
+        node("h1", {}, "Open Workspace"),
         node("p", { class: "muted" }, "Start the local server with ", code("make run"), ", then open the dashboard."),
         node("a", { class: "button primary", href: "http://127.0.0.1:8765/" }, "Open dashboard"))));
     return;
   }
   setupTermHelp();
-  $("#f1-terms").addEventListener("click", () => openDialog("F1 terms", facts(Object.values(f1Terms))));
   $(".skip").addEventListener("click", (event) => {
     event.preventDefault();
     $("#content").focus();

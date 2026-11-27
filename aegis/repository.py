@@ -38,12 +38,12 @@ class Repository:
         if not (self.root / ".git").is_dir():
             self.root.mkdir(exist_ok=True)
             self.git(self.root, "init", "--initial-branch=main")
-        self.git(self.root, "config", "user.name", "Pit Crew Harness Lead")
-        self.git(self.root, "config", "user.email", "lead@pitcrew.local")
+        self.git(self.root, "config", "user.name", "Aegis Lead")
+        self.git(self.root, "config", "user.email", "lead@aegis.local")
         self.git(self.root, "config", "core.hooksPath", "/dev/null")
         self.git(self.root, "config", "commit.gpgSign", "false")
         if self.git(self.root, "rev-parse", "--verify", "HEAD", check=False).returncode:
-            self.git(self.root, "commit", "--allow-empty", "-m", "Initialize Pit Crew Harness monorepo")
+            self.git(self.root, "commit", "--allow-empty", "-m", "Initialize Aegis monorepo")
 
     @staticmethod
     def git(cwd, *args, check=True, index=None, data=None, binary=False):
@@ -58,9 +58,11 @@ class Repository:
             raise RuntimeError(f"Git {args[0]} failed: {detail.strip()[-1500:]}")
         return result
 
-    @staticmethod
-    def github_ref(project, suffix="head"):
-        return f"refs/pitcrew/github/{project}/{suffix}"
+    def github_ref(self, project, suffix="head"):
+        legacy = f"refs/pitcrew/github/{project}/"
+        if self.git(self.root, "show-ref", "--verify", "--quiet", legacy + "head", check=False).returncode == 0:
+            return legacy + suffix.replace("sessions/", "laps/", 1)
+        return f"refs/aegis/github/{project}/{suffix}"
 
     def import_github(self, project, url, branch):
         ref = self.github_ref(project)
@@ -109,7 +111,7 @@ class Repository:
 
     def commit_github(self, session, original, entries, files):
         base = session["github_base"]
-        ref = self.github_ref(session["project_id"], "laps/" + session["id"])
+        ref = self.github_ref(session["project_id"], "sessions/" + session["id"])
         saved = self.git(self.root, "rev-parse", "--verify", ref, check=False)
         if saved.returncode == 0:
             return saved.stdout.strip()
@@ -131,7 +133,7 @@ class Repository:
                          f"{mode},{blob.stdout.decode().strip()},{name}", index=index)
             tree = self.git(self.root, "write-tree", index=index).stdout.strip()
         commit = self.git(self.root, "commit-tree", tree, "-p", base, "-m",
-                          f"Pit Crew: approved lap {session['id']}").stdout.strip()
+                          f"Aegis: approved session {session['id']}").stdout.strip()
         self.git(self.root, "update-ref", ref, commit, "0" * len(commit))
         return commit
 
@@ -141,7 +143,7 @@ class Repository:
             self.git(self.root, "update-ref", ref, commit, session["github_base"])
 
     def publish_github(self, session, url):
-        branch = "pitcrew/lap-" + session["id"]
+        branch = session.get("github_published") or "aegis/session-" + session["id"]
         self.git(self.root, *GITHUB_OPTIONS, "push", "--", github_url(url),
                  f"{session['github_commit']}:refs/heads/{branch}")
         return branch

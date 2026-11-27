@@ -26,7 +26,7 @@ BROWSER_SKILL_BYTES = 1_600_000
 
 
 def configuration(directory):
-    override = environment("PITCREW_EXTENSIONS")
+    override = environment("AEGIS_EXTENSIONS")
     return (Path(override).resolve(), False) if override else (directory / "extensions.toml", True)
 
 

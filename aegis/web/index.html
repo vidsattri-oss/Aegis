@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>Pit Wall | Pit Crew Harness</title>
-  <link rel="icon" type="image/png" href="./pitcrew-mark.png">
+  <title>Aegis | Workspace</title>
+  <link rel="icon" type="image/png" href="./aegis-mark.png">
   <link rel="stylesheet" href="./styles.css">
   <script defer src="./app.js"></script>
   <script defer src="./workspace-tools.js"></script>
@@ -14,17 +14,17 @@
 <body>
   <a class="skip" href="#content">Skip to content</a>
   <div class="shell">
-    <aside class="sidebar" aria-label="Pit Wall navigation">
+    <aside class="sidebar" aria-label="Workspace navigation">
       <a class="brand" href="#workspace">
-        <img class="mark" src="./pitcrew-mark.png" alt="" width="34" height="34">
-        <span>Pit Crew Harness<small>Pit Wall</small></span>
+        <img class="mark" src="./aegis-mark.png" alt="" width="34" height="34">
+        <span>Aegis</span>
       </a>
       <nav id="navigation"></nav>
       <div class="sidebar-bottom">
-        <button class="nav-button" id="settings-button" type="button" data-f1-term="power-unit" aria-describedby="f1-term-power-unit">Power Unit</button>
-        <button class="nav-button" id="execution-button" type="button" data-f1-term="pit-setup" aria-describedby="f1-term-pit-setup">Pit Setup</button>
-        <button class="nav-button" id="extensions-button" type="button" data-f1-term="toolbox" aria-describedby="f1-term-toolbox">Toolbox</button>
-        <button class="nav-button" id="dreaming-button" type="button" data-f1-term="setup-book" aria-describedby="f1-term-setup-book">Setup Book</button>
+        <button class="nav-button" id="settings-button" type="button" data-help-term="model-provider" aria-describedby="help-term-model-provider">Model Provider</button>
+        <button class="nav-button" id="execution-button" type="button" data-help-term="execution" aria-describedby="help-term-execution">Execution</button>
+        <button class="nav-button" id="extensions-button" type="button" data-help-term="toolbox" aria-describedby="help-term-toolbox">Skills & Tools</button>
+        <button class="nav-button" id="dreaming-button" type="button" data-help-term="memory" aria-describedby="help-term-memory">Memory</button>
         <div class="engine" id="engine"><i></i><span>Checking Docker</span></div>
       </div>
     </aside>
@@ -32,7 +32,6 @@
       <header class="topbar">
         <nav id="breadcrumbs" aria-label="Breadcrumb"></nav>
         <div class="topbar-tools">
-          <button class="button quiet terms-button" id="f1-terms" type="button">F1 terms</button>
           <span class="local">Local only</span>
         </div>
       </header>
@@ -42,6 +41,6 @@
   <div id="lead-chat-root"></div>
   <dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <noscript>Enable JavaScript to use Pit Wall.</noscript>
+  <noscript>Enable JavaScript to use Aegis.</noscript>
 </body>
 </html>

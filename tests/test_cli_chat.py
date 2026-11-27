@@ -10,11 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pitcrew.cli import ChatShell, LocalWorkspace, parser_for_cli
-from pitcrew.engine import Lead
-from pitcrew.integrations import provider_settings
-from pitcrew.store import Store
-from pitcrew.terminal import SHINE_FRAMES, TWINKLE, Terminal
+from aegis.cli import ChatShell, LocalWorkspace, parser_for_cli
+from aegis.engine import Lead
+from aegis.integrations import provider_settings
+from aegis.store import Store
+from aegis.terminal import SHINE_FRAMES, TWINKLE, Terminal
 from test_provider_models import FOUNDRY_PROJECT, FOUNDRY_RESOURCE, KeyringFixture
 from test_workspace import DockerFixture
 
@@ -29,7 +29,7 @@ class CliChatTest(unittest.TestCase):
             return "OK", (1, 1)
 
         deployments = {"value": [{"type": "ModelDeployment", "name": "team-chat"}]}
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"AEGIS_PROVIDER": "demo"}):
             keyring = KeyringFixture()
             directory = Path(temp)
             with closing(Lead(directory, model=model, keyring=keyring)) as lead, redirect_stdout(io.StringIO()) as output:
@@ -37,8 +37,8 @@ class CliChatTest(unittest.TestCase):
                 chat = ChatShell(backend, SimpleNamespace(no_animation=True, project="Workshop", session=None))
                 inputs = ["/setup", "3", FOUNDRY_PROJECT, "y", "/provider test", "/run Build a local planner", "/exit"]
                 with (patch("builtins.input", side_effect=inputs),
-                      patch("pitcrew.cli.prompt_credential", return_value=key),
-                      patch("pitcrew.integrations.request", return_value=(json.dumps(deployments).encode(), "application/json")),
+                      patch("aegis.cli.prompt_credential", return_value=key),
+                      patch("aegis.integrations.request", return_value=(json.dumps(deployments).encode(), "application/json")),
                       patch.object(backend, "run", return_value="a" * 16) as run):
                     chat.run()
 
@@ -59,14 +59,14 @@ class CliChatTest(unittest.TestCase):
         def reject_model(settings, credential, persona, context, timeout):
             raise RuntimeError(f"Credential rejected: {credential}")
 
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"AEGIS_PROVIDER": "demo"}):
             directory = Path(temp)
             keyring = KeyringFixture()
             with closing(Lead(directory, model=reject_model, keyring=keyring)) as lead, redirect_stdout(io.StringIO()) as output:
                 lead.configure({"kind": "compatible", "endpoint": "https://existing.example/v1", "model": "existing"})
                 chat = ChatShell(LocalWorkspace(directory, lead), SimpleNamespace(no_animation=True, project=None, session=None))
                 with (patch("builtins.input", side_effect=["/setup foundry", FOUNDRY_RESOURCE, "team-chat", "y", "/exit"]),
-                      patch("pitcrew.cli.prompt_credential", return_value=key)):
+                      patch("aegis.cli.prompt_credential", return_value=key)):
                     chat.run()
 
                 self.assertIn("Credential rejected", output.getvalue())
@@ -77,13 +77,13 @@ class CliChatTest(unittest.TestCase):
     def test_local_setup_discovers_a_model_and_uses_the_loopback_api(self):
         model_list = b'{"data":[{"id":"local-chat"}]}'
         reply = b'{"choices":[{"message":{"content":"OK"}}]}'
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"AEGIS_PROVIDER": "demo"}):
             directory = Path(temp)
             with closing(Lead(directory)) as lead, redirect_stdout(io.StringIO()) as output:
                 chat = ChatShell(LocalWorkspace(directory, lead), SimpleNamespace(no_animation=True, project=None, session=None))
                 with (patch("builtins.input", side_effect=["/setup", "4", "", "", "/exit"]),
-                      patch("pitcrew.cli.prompt_credential", return_value=""),
-                      patch("pitcrew.integrations.request", side_effect=[(model_list, "application/json"),
+                      patch("aegis.cli.prompt_credential", return_value=""),
+                      patch("aegis.integrations.request", side_effect=[(model_list, "application/json"),
                                                                       (reply, "application/json")]) as request):
                     chat.run()
 
@@ -109,12 +109,12 @@ class CliChatTest(unittest.TestCase):
                                       f"assert set({required!r}).issubset(sys.argv)\n"
                                       "assert '--model=team-model' in sys.argv\n"
                                       "assert not os.listdir()\n"
-                                      "assert 'PITCREW_API_KEY' not in os.environ\n"
-                                      "assert 'Pit Crew Harness provider connectivity' in sys.stdin.read()\n"
+                                      "assert 'AEGIS_API_KEY' not in os.environ\n"
+                                      "assert 'Aegis provider connectivity' in sys.stdin.read()\n"
                                       f"print({response!r})\n")
                 executable.chmod(0o700)
                 env = {"PATH": os.pathsep.join((str(directory), os.environ.get("PATH", ""))),
-                       "PITCREW_PROVIDER": "demo", "PITCREW_API_KEY": "unrelated-fixture-secret"}
+                       "AEGIS_PROVIDER": "demo", "AEGIS_API_KEY": "unrelated-fixture-secret"}
                 with (patch.dict(os.environ, env), closing(Lead(directory / "workspace")) as lead,
                       redirect_stdout(io.StringIO()) as output,
                       patch("builtins.input", side_effect=["/setup", choice, "team-model", "/provider test", "/exit"])):
@@ -125,7 +125,7 @@ class CliChatTest(unittest.TestCase):
                     self.assertNotIn("unrelated-fixture-secret", output.getvalue())
 
     def test_demo_run_and_conversation_from_the_terminal(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"AEGIS_PROVIDER": "demo"}):
             directory = Path(temp)
             with closing(Lead(directory, docker=DockerFixture())) as lead, redirect_stdout(io.StringIO()) as output:
                 args = SimpleNamespace(no_animation=True, project="Workshop", session=None)
@@ -135,14 +135,14 @@ class CliChatTest(unittest.TestCase):
                     chat.run()
                 ask.assert_called_once_with("How many approvals passed?")
                 text = output.getvalue()
-                self.assertIn("Pit Crew Harness", text)
-                self.assertIn("=========|", text)
+                self.assertIn("Aegis", text)
+                self.assertIn(".--------------.", text)
                 self.assertIn("completed", text)
-                self.assertIn("Race Engineer > The lap is completed.", text)
+                self.assertIn("Lead Agent > The session is completed.", text)
                 self.assertIn("7 of 7 gates", text)
                 self.assertNotIn("\x1b", text)
 
-    def test_plain_exit_does_not_start_a_stint(self):
+    def test_plain_exit_does_not_start_a_session(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             with closing(Lead(directory, docker=DockerFixture())) as lead, redirect_stdout(io.StringIO()):
@@ -153,20 +153,16 @@ class CliChatTest(unittest.TestCase):
                     chat.run()
                 start.assert_not_called()
 
-    def test_motorsport_commands_alias_existing_cli_actions(self):
+    def test_cli_uses_project_and_session_commands(self):
         parser = parser_for_cli()
-        command_aliases = {
-            "racedays": ("garages", "projects"), "laps": ("stints", "sessions"),
-            "telemetry": ("logs",), "toolbox": ("extensions",), "pit-setup": ("garage-setup", "execution"),
-        }
-        for name, aliases in command_aliases.items():
-            arguments = ["0123456789abcdef"] if name == "telemetry" else []
-            for alias in aliases:
-                self.assertEqual(parser.parse_args([name, *arguments]), parser.parse_args([alias, *arguments]))
-        for option in ("--raceday", "--garage", "--project"):
-            self.assertEqual(parser.parse_args(["run", option, "Workshop"]).project, "Workshop")
-        for option in ("--lap", "--stint", "--session"):
-            self.assertEqual(parser.parse_args(["chat", option, "0123456789abcdef"]).session, "0123456789abcdef")
+        self.assertIn("usage: aegis", parser.format_help())
+        for name in ("projects", "sessions", "extensions", "execution"):
+            self.assertEqual(parser.parse_args([name]).command, name)
+        session = "0123456789abcdef"
+        self.assertEqual(parser.parse_args(["logs", session]).session, session)
+        self.assertEqual(parser.parse_args(["run", "--project", "Workshop"]).project, "Workshop")
+        self.assertEqual(parser.parse_args(["chat", "--session", session]).session, session)
+        self.assertEqual(parser.parse_args(["new-project", "Workshop"]).name, "Workshop")
 
     def test_banner_sweeps_before_twinkle_and_fits_a_narrow_terminal(self):
         terminal = Terminal(animation=False)
@@ -178,7 +174,7 @@ class CliChatTest(unittest.TestCase):
         sparkle = terminal.banner_frame(SHINE_FRAMES + TWINKLE.index("*"), 80)
         self.assertTrue(sparkle[1].endswith("*"))
         self.assertNotIn("*", "".join(sparkle[2:]))
-        self.assertEqual(terminal.banner_frame(SHINE_FRAMES, 20), ["Pit Crew Harness", "/help for commands"])
+        self.assertEqual(terminal.banner_frame(SHINE_FRAMES, 20), ["Aegis", "/help for commands"])
 
     def test_animated_terminal_restores_the_cursor_and_removes_control_characters(self):
         palettes = (("xterm", "", "93"), ("xterm-256color", "", "38;5;221"),
@@ -188,14 +184,14 @@ class CliChatTest(unittest.TestCase):
                 with patch("sys.stdout.isatty", return_value=True):
                     terminal = Terminal(animation=True)
                 self.assertEqual(terminal.palette["gold"], gold)
-                self.assertIn("radio>", terminal.prompt(True, readline=True))
+                self.assertIn("lead>", terminal.prompt(True, readline=True))
 
         with (redirect_stdout(io.StringIO()) as output,
-              patch("pitcrew.terminal.shutil.get_terminal_size", return_value=os.terminal_size((80, 24))),
-              patch("pitcrew.terminal.time.sleep")):
+              patch("aegis.terminal.shutil.get_terminal_size", return_value=os.terminal_size((80, 24))),
+              patch("aegis.terminal.time.sleep")):
             terminal.banner()
             with terminal.waiting("Checks\x1b ready") as pause:
-                with patch("pitcrew.terminal.time.monotonic", side_effect=[0.0, 0.0, 1.0]):
+                with patch("aegis.terminal.time.monotonic", side_effect=[0.0, 0.0, 1.0]):
                     pause(0.1)
         self.assertIn("\033[?25l", output.getvalue())
         self.assertIn("\033[?25h", output.getvalue())
@@ -206,7 +202,7 @@ class CliChatTest(unittest.TestCase):
             root = Path(temporary)
             data, restored = root / "workspace", root / "restored"
             project = Store(data).project("Service fixture", "")
-            archive, unit = root / "backup.zip", root / "pitcrew.service"
+            archive, unit = root / "backup.zip", root / "aegis.service"
             base = [sys.executable, "-m", "omni"]
             commands = ((data, ("service", "--port", "8766", "--docker-context", "desktop-linux", "--write", str(unit))),
                         (data, ("backup", str(archive))), (restored, ("restore", str(archive))))
@@ -224,7 +220,7 @@ class CliChatTest(unittest.TestCase):
             requests.append(context)
             return '{"answer":"The last gate passed."}', (0, 0)
 
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"AEGIS_PROVIDER": "demo"}):
             with closing(Lead(Path(temp), model=model)) as lead:
                 store = lead.store
                 project = store.project("Workshop", "")

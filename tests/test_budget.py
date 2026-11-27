@@ -13,13 +13,13 @@ from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import test_workspace
-from pitcrew import demo, integrations
-from pitcrew.agent_cli import complete_with_cli
-from pitcrew.azure_prices import azure_token_rates
-from pitcrew.contracts import PERSONAS
-from pitcrew.engine import BudgetPaused, Lead, model_for_role, with_model_pool
-from pitcrew.store import Store, now, uid
-from pitcrew.usage import MeteredModelError, Usage
+from aegis import demo, integrations
+from aegis.agent_cli import complete_with_cli
+from aegis.azure_prices import azure_token_rates
+from aegis.contracts import PERSONAS
+from aegis.engine import BudgetPaused, Lead, model_for_role, with_model_pool
+from aegis.store import Store, now, uid
+from aegis.usage import MeteredModelError, Usage
 
 
 ROUTER = {"kind": "compatible", "endpoint": "https://openrouter.ai/api/v1", "model": "fixture/model"}
@@ -38,7 +38,7 @@ class VendorUsageTest(unittest.TestCase):
     def test_azure_retail_prices_use_exact_token_meters_and_match_skus(self):
         incoming = azure_meter(INPUT_METER, "Inp", 0.002)
         outgoing = azure_meter(OUTPUT_METER, "Outp", 0.008)
-        with patch("pitcrew.azure_prices.request", return_value=(json.dumps({"Items": [incoming, outgoing]}).encode(), "application/json")) as fetch:
+        with patch("aegis.azure_prices.request", return_value=(json.dumps({"Items": [incoming, outgoing]}).encode(), "application/json")) as fetch:
             rates = azure_token_rates("eastus", INPUT_METER, OUTPUT_METER)
         self.assertEqual((rates["input_rate"], rates["output_rate"], rates["rate_source"]), (2.0, 8.0, "azure_retail"))
         url = urlsplit(fetch.call_args.args[0])
@@ -46,7 +46,7 @@ class VendorUsageTest(unittest.TestCase):
         self.assertIn(OUTPUT_METER, parse_qs(url.query)["$filter"][0])
         self.assertNotIn("headers", fetch.call_args.kwargs)
         mismatch = azure_meter(OUTPUT_METER, "Outp", 0.008, model="gpt 4.1 mini")
-        with patch("pitcrew.azure_prices.request", return_value=(json.dumps({"Items": [incoming, mismatch]}).encode(), "application/json")):
+        with patch("aegis.azure_prices.request", return_value=(json.dumps({"Items": [incoming, mismatch]}).encode(), "application/json")):
             with self.assertRaisesRegex(ValueError, "same model and deployment SKU"):
                 azure_token_rates("eastus", INPUT_METER, OUTPUT_METER)
         with self.assertRaisesRegex(ValueError, "region code"):
@@ -110,7 +110,7 @@ class VendorUsageTest(unittest.TestCase):
             self.assertEqual(usage.request_id, "fixture")
 
 
-class RaceDayBudgetTest(unittest.TestCase):
+class ProjectBudgetTest(unittest.TestCase):
     def setUp(self):
         self.data = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
@@ -156,7 +156,7 @@ class RaceDayBudgetTest(unittest.TestCase):
             lead.retry(sid)
         with self.assertRaisesRegex(BudgetPaused, "budget reached"):
             lead.launch(project, "Send a new request")
-        radio = lead.chat(sid, "Why is the lap paused?")
+        radio = lead.chat(sid, "Why is the session paused?")
         lead.chats.submit(lambda: None).result(timeout=5)
         self.assertIn("budget reached", lead.store.chat_reply(sid, radio)["text"])
         self.assertEqual(calls, ["lead", "review"])
@@ -299,7 +299,7 @@ class RaceDayBudgetTest(unittest.TestCase):
     def test_claude_budget_stop_records_usage_and_passes_the_remaining_amount(self):
         def run_vendor(settings, *args):
             self.assertEqual(settings["remaining_model_budget"], 0.25)
-            raise MeteredModelError("Claude Code reached the remaining RaceDay budget", Usage((30, 10), 0.26, "vendor_estimate"),
+            raise MeteredModelError("Claude Code reached the remaining Project budget", Usage((30, 10), 0.26, "vendor_estimate"),
                                     budget_reached=True)
 
         lead = self.lead(run_vendor)
@@ -320,7 +320,7 @@ class RaceDayBudgetTest(unittest.TestCase):
         models = [{"id": model, "chat": True} for model in ("gpt-deployment", "partner-deployment")]
         lead.store.set("provider", with_model_pool(foundry, models, {"lead": "gpt-deployment", "review": "partner-deployment"}))
         published = {"input_rate": 2, "output_rate": 8, "rate_source": "azure_retail", "region": "eastus"}
-        with patch("pitcrew.engine.azure_token_rates", return_value=published):
+        with patch("aegis.engine.azure_token_rates", return_value=published):
             result = lead.import_azure_prices({"model": "gpt-deployment", "region": "eastus",
                                               "input_meter": INPUT_METER, "output_meter": OUTPUT_METER})
         self.assertEqual(result["rates"], published)

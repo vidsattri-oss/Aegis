@@ -1,4 +1,4 @@
-# Use this file with PITCREW_EXTENSIONS, or copy it to your workspace as
+# Use this file with AEGIS_EXTENSIONS, or copy it to your workspace as
 # extensions.toml and adjust the Skill paths relative to the new location.
 
 [[skills]]

@@ -8,20 +8,20 @@ from contextlib import contextmanager
 from itertools import count, groupby
 
 
-PIT_ENTRY = (
-    r"   ____________     __________",
-    r"  ##############\   \=========|",
-    r"  ###############\   \========|",
-    r"  ___________ \###\   '-------'",
-    r"  ###########\ \###\___________",
-    r"   '----------' \##############",
-    r"                 '-------------",
+SHIELD = (
+    r"   .--------------.",
+    r"   |      /\      |",
+    r"   |     /##\     |",
+    r"   |    /----\    |",
+    r"   \   /      \   /",
+    r"    '._        _.'",
+    r"       '.___.'",
 )
-ART_WIDTH = max(map(len, PIT_ENTRY)) + 4
-SHINE_FRAMES = (ART_WIDTH + len(PIT_ENTRY) * 2) // 2
+ART_WIDTH = max(map(len, SHIELD)) + 4
+SHINE_FRAMES = (ART_WIDTH + len(SHIELD) * 2) // 2
 TWINKLE = (" ", ".", "+", "*", "+", ".", " ", "+")
 TRAIL = (("*", "gold"), ("o", "shine"), (".", "blue"), (".", "steel"))
-WORDMARK = "Pit Crew Harness"
+WORDMARK = "Aegis"
 COLORS = {
     # RGB, xterm-256 index, basic ANSI foreground
     "gold": ((255, 200, 98), 221, 93),
@@ -66,7 +66,7 @@ class Terminal:
         return text
 
     def banner_frame(self, step, columns):
-        title = self.style("Pit Crew", "blue", bold=True) + self.style(" Harness", "gold", bold=True)
+        title = self.style(WORDMARK, "blue", bold=True)
         hints = self.style("/help", "blue") + " for commands"
         if columns < ART_WIDTH:
             return [title, hints]
@@ -74,16 +74,16 @@ class Terminal:
         wide = columns >= ART_WIDTH + 4 + len("/help for commands")
         twinkle = TWINKLE[step - SHINE_FRAMES] if step >= SHINE_FRAMES else " "
         lines = [""]
-        for row, shape in enumerate(PIT_ENTRY):
+        for row, shape in enumerate(SHIELD):
             cells = []
             for column, char in enumerate(shape):
-                pit_box = row <= 3 and column >= 20
                 distance = abs(column + 2 * row - 2 * step)
                 if step < SHINE_FRAMES and distance <= 2 and char != " ":
-                    char = "@" if char == "#" and not self.palette else char
+                    if not self.palette:
+                        char = "@" if char == "#" else "#"
                     tone = "shine" if distance < 2 else "blue"
                 else:
-                    tone = "gold" if pit_box else "blue"
+                    tone = "gold" if char in "|.'_-" else "blue"
                 cells.append((char, tone))
             if row == 0:
                 cells.extend((char, "gold") for char in twinkle.rjust(ART_WIDTH - len(shape)))
@@ -102,7 +102,7 @@ class Terminal:
         if columns < len(WORDMARK) or rows < 4:
             self.write(WORDMARK)
             return
-        if rows < len(PIT_ENTRY) + 6:
+        if rows < len(SHIELD) + 6:
             columns = min(columns, ART_WIDTH - 1)
         last = SHINE_FRAMES + len(TWINKLE) - 1
         animate = self.animate and columns >= ART_WIDTH
@@ -135,7 +135,7 @@ class Terminal:
         print(self.style(terminal_text(label), tone, bold=True) + terminal_text(text), flush=True)
 
     def prompt(self, attached, *, readline):
-        prompt = "radio>" if attached else "pitcrew>"
+        prompt = "lead>" if attached else "aegis>"
         code = self.palette.get("mint" if attached else "blue")
         if code and readline:
             return f"\001\033[1;{code}m\002{prompt}\001{RESET}\002 "

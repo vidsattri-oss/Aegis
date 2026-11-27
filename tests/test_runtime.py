@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 from containers import runtime
-from pitcrew.sandbox import Docker, RoleChannel, run_command
+from aegis.sandbox import Docker, RoleChannel, run_command
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -129,7 +129,7 @@ class DockerTransportTest(unittest.TestCase):
 
         valid = {"summary": "Check tab order", "findings": ["Focus should follow layout"],
                  "recommendations": ["Add a keyboard journey"]}
-        with patch("pitcrew.sandbox.subprocess.Popen", side_effect=launch_worker), patch.object(docker, "remove") as remove:
+        with patch("aegis.sandbox.subprocess.Popen", side_effect=launch_worker), patch.object(docker, "remove") as remove:
             with docker.role("crew-worker", "workspace", "specialist", 5) as invoke:
                 self.assertEqual(invoke("submit", {"draft": valid}, 5), valid)
                 with self.assertRaisesRegex(ValueError, "submit"):
@@ -146,7 +146,7 @@ class DockerTransportTest(unittest.TestCase):
             for program, error in (("print('build output')", None),
                                    ("print('failed output'); raise SystemExit(4)", RuntimeError),
                                    ("import time; time.sleep(5)", TimeoutError)):
-                with self.subTest(program=program), patch("pitcrew.sandbox.subprocess.Popen",
+                with self.subTest(program=program), patch("aegis.sandbox.subprocess.Popen",
                         side_effect=lambda command, **kwargs: popen([sys.executable, "-c", program],
                                                                      env=environment, **kwargs)):
                     arguments = ("crew-build", "workspace", "deploy", source, None, 3 if error != TimeoutError else 0.1,
@@ -175,7 +175,7 @@ class DockerTransportTest(unittest.TestCase):
             replies = {"/": fixture, "/redirect": redirect, "/other": external}
             return SimpleNamespace(stdout=json.dumps(replies.get(request["path"], {})).encode())
 
-        with tempfile.TemporaryDirectory() as source, patch("pitcrew.sandbox.run_command", side_effect=docker_command) as command:
+        with tempfile.TemporaryDirectory() as source, patch("aegis.sandbox.run_command", side_effect=docker_command) as command:
             preview = self.enterContext(closing(docker.preview("crew-preview", "workspace", source, lifetime=30)))
             with closing(http.client.HTTPConnection("127.0.0.1", preview.server.server_port, timeout=3)) as client:
                 for method, path, headers, status, body in (

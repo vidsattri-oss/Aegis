@@ -10,16 +10,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 import test_workspace
-from pitcrew import cli
-from pitcrew.engine import Lead
-from pitcrew.server import WorkspaceServer, workspace_lock
+from aegis import cli
+from aegis.engine import Lead
+from aegis.server import WorkspaceServer, workspace_lock
 
 
-class PitWallAPITest(unittest.TestCase):
+class WorkspaceAPITest(unittest.TestCase):
     def setUp(self):
         environment = patch.dict(os.environ, {
             key: value for key, value in os.environ.items()
-            if not key.startswith(("PITCREW_", "OMNI_", "AI_GATEWAY_"))
+            if not key.startswith(("AEGIS_", "PITCREW_", "OMNI_", "AI_GATEWAY_"))
         }, clear=True)
         self.enterContext(environment)
         self.data = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -43,7 +43,7 @@ class PitWallAPITest(unittest.TestCase):
 
     def post(self, path, value):
         return self.request(path, method="POST", data=json.dumps(value),
-                            headers={"Content-Type": "application/json", "X-Pitcrew-Token": self.remote.token})
+                            headers={"Content-Type": "application/json", "X-Aegis-Token": self.remote.token})
 
     def command(self, *args, code=0):
         output, errors = io.StringIO(), io.StringIO()
@@ -59,7 +59,7 @@ class PitWallAPITest(unittest.TestCase):
     def test_assets_and_mutations_require_valid_local_requests(self):
         status, headers, body = self.request("/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Pit Crew Harness", body)
+        self.assertIn(b"Aegis", body)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         self.assertEqual(headers["Cross-Origin-Resource-Policy"], "same-origin")
         self.assertEqual(self.request("/app.js", method="HEAD")[2], b"")
@@ -67,7 +67,7 @@ class PitWallAPITest(unittest.TestCase):
         self.assertEqual(self.request("/api/workspace", headers={"Sec-Fetch-Site": "same-site"})[0], 403)
         self.assertEqual(self.request("/api/workspace", headers={"Sec-Fetch-Site": "same-origin"})[0], 200)
         self.assertEqual(self.request("/api/projects", method="POST", data="{}")[0], 403)
-        auth = {"X-Pitcrew-Token": self.remote.token}
+        auth = {"X-Aegis-Token": self.remote.token}
         self.assertEqual(self.request("/api/projects", method="POST", data="{}",
                                       headers=auth | {"Origin": "https://example.invalid"})[0], 403)
         self.assertEqual(self.request("/api/projects", method="POST", data="{}", headers=auth)[0], 415)
@@ -79,10 +79,10 @@ class PitWallAPITest(unittest.TestCase):
             with workspace_lock(self.data):
                 self.fail("Two writers acquired the workspace lock")
 
-    def test_remote_cli_runs_a_lap_and_reads_its_attempts_and_build(self):
-        project = json.loads(self.command("new-raceday", "Practice", "--json")[0])
-        self.assertIn("Practice", self.command("racedays")[0])
-        sid = json.loads(self.command("run", "--demo", "--detach", "--raceday", "Practice", "--json")[0])["id"]
+    def test_remote_cli_runs_a_session_and_reads_its_attempts_and_build(self):
+        project = json.loads(self.command("new-project", "Practice", "--json")[0])
+        self.assertIn("Practice", self.command("projects")[0])
+        sid = json.loads(self.command("run", "--demo", "--detach", "--project", "Practice", "--json")[0])["id"]
         result = test_workspace.WorkspaceTest.completed(self.lead, sid)
         self.assertEqual(result["state"], "completed", result["error"])
         path = f"/api/sessions/{sid}"
@@ -95,10 +95,10 @@ class PitWallAPITest(unittest.TestCase):
         self.assertEqual(self.request(f"{path}/telemetry?before=2&after=1")[0], 400)
         self.assertEqual(self.request(f"{path}/telemetry?event=999999")[0], 404)
         event = self.remote.events(sid, role="lead")["events"][0]
-        self.assertIn(f"{event['id']}", self.command("telemetry", sid, "--event", str(event["id"]))[0])
-        self.assertIn("lead", self.command("telemetry", sid, "--role", "lead")[0].lower())
+        self.assertIn(f"{event['id']}", self.command("logs", sid, "--event", str(event["id"]))[0])
+        self.assertIn("lead", self.command("logs", sid, "--role", "lead")[0].lower())
         self.assertIn(sid, self.command("status", sid)[0])
-        self.assertIn(sid, self.command("laps", "--raceday", project["id"])[0])
+        self.assertIn(sid, self.command("sessions", "--project", project["id"])[0])
         status, headers, body = self.request(f"{path}/build")
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/zip")
@@ -106,31 +106,31 @@ class PitWallAPITest(unittest.TestCase):
         self.assertIn("Preview stopped", self.command("preview", sid, "--stop")[0])
         self.assertIn("http://127.0.0.1", self.command("preview", sid)[0])
         self.assertEqual(self.post(f"{path}/publish", {})[0], 400)
-        question = self.remote.chat(sid, "Is the lap complete?")
+        question = self.remote.chat(sid, "Is the session complete?")
         self.lead.chats.submit(lambda: None).result(timeout=5)
         self.assertIn("completed", self.remote.chat_reply(sid, question)["text"])
 
-    def test_workspace_settings_and_queued_lap_controls(self):
+    def test_workspace_settings_and_queued_session_controls(self):
         project = self.remote.create("Controls")
         lead = self.lead
         data = {"kind": "compatible", "endpoint": "http://127.0.0.1:8181/v1", "model": "fixture"}
         with patch.object(lead, "model", return_value=("OK", (0, 0))):
             self.assertEqual(self.remote.configure(data)["model"], "fixture")
             self.assertIn("fixture", self.command("provider-test")[0])
-        with patch("pitcrew.engine.list_provider_models", return_value={"models": [{"id": "fixture"}]}):
+        with patch("aegis.engine.list_provider_models", return_value={"models": [{"id": "fixture"}]}):
             self.assertEqual(self.command("models")[0].strip(), "fixture")
         self.assertIn("removed", self.command("credential", "forget")[0])
         policy = self.data / "limits.json"
         policy.write_text(json.dumps({"sessions": 2, "parallel_reviews": True, "adaptive_sessions": True,
                                       "deep_research": True}), encoding="utf-8")
-        setup, _ = self.command("pit-setup", "--apply", str(policy))
-        self.assertIn("Concurrent laps  2", setup)
+        setup, _ = self.command("execution", "--apply", str(policy))
+        self.assertIn("Concurrent sessions  2", setup)
         self.assertIn("Adaptive concurrency  On", setup)
-        self.assertIn("Autoresearch Beast Mode  On", setup)
-        self.assertIn("reserved", json.loads(self.command("pit-setup", "--pressure")[0]))
+        self.assertIn("Deep Research  On", setup)
+        self.assertIn("reserved", json.loads(self.command("execution", "--pressure")[0]))
         self.assertIn("Docker", self.command("doctor", "--full", "--local-only")[0])
         self.assertEqual(self.request("/api/doctor")[0], 200)
-        self.assertIn("No Skills", self.command("toolbox", "--check")[0])
+        self.assertIn("No Skills", self.command("extensions", "--check")[0])
         self.assertIn("callback", self.remote.request("/api/extensions/config"))
         self.assertEqual(self.post("/api/extensions/config", {"text": "", "base": ""})[0], 200)
         skill = {"files": {"SKILL.md": "---\nname: checks\ndescription: Checks\n---\nConfirm focus order."},
@@ -163,9 +163,9 @@ class PitWallAPITest(unittest.TestCase):
         self.assertEqual(self.post(path, {"budget_usd": -1})[0], 400)
         self.assertEqual(self.post(path, {"budget_usd": 1.123})[0], 400)
         self.assertEqual(self.post(path, {})[0], 400)
-        saved = json.loads(self.command("budget", "--raceday", "Budgeted Board", "--limit", "12.25", "--json")[0])
+        saved = json.loads(self.command("budget", "--project", "Budgeted Board", "--limit", "12.25", "--json")[0])
         self.assertEqual(saved["remaining_usd"], 12.25)
         self.assertEqual(self.remote.request(f"/api/projects/{project}/sessions")["budget"], saved)
         self.assertEqual(self.post(path, {"budget_usd": 0})[0], 200)
-        self.assertIn("Budget reached", self.command("budget", "--raceday", project)[0])
-        self.assertIn("Unset", self.command("budget", "--raceday", project, "--clear")[0])
+        self.assertIn("Budget reached", self.command("budget", "--project", project)[0])
+        self.assertIn("Unset", self.command("budget", "--project", project, "--clear")[0])

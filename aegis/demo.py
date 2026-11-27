@@ -9,7 +9,7 @@ PROMPT = (
     "Keep edits after reload and make the application work offline in the preview."
 )
 TITLE = "Fieldwork — Expedition planner"
-ASSETS = files("pitcrew").joinpath("sample")
+ASSETS = files("aegis").joinpath("sample")
 # The build contract accepts text files. Embedding WebP in CSS keeps the preview offline.
 PANORAMA = base64.b64encode(ASSETS.joinpath("dolomites.webp").read_bytes()).decode("ascii")
 FILES = {

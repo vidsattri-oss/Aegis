@@ -7,3 +7,5 @@ dist/
 .omni-smoke-*/
 .pitcrew-data/
 .pitcrew-smoke-*/
+.aegis-data/
+.aegis-smoke-*/

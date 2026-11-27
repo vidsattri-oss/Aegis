@@ -23,7 +23,7 @@ def complete_with_cli(settings, persona, data, timeout):
     kind = settings["kind"]
     name, binary = AGENT_CLIS[kind]
     executable = shutil.which(binary)
-    require(executable, f"Install {name} on the machine running Pit Crew Harness and sign in there")
+    require(executable, f"Install {name} on the machine running Aegis and sign in there")
     if kind == "claude-code":
         options = ["-p", "--restricted", "--tools", "", "--disallowed-tools", "*", "--strict-mcp-config",
                    "--mcp-config", '{"mcpServers":{}}', "--no-session-persistence", "--max-turns", "1",
@@ -38,7 +38,7 @@ def complete_with_cli(settings, persona, data, timeout):
         options.append("--model=" + settings["model"])
     environment = {key: os.environ[key] for key in (*COMMON_ENV, *AUTH_ENV[kind]) if key in os.environ}
     prompt = (persona + "\n\nRequest data (JSON):\n" + json.dumps(data, ensure_ascii=False)).encode()
-    with tempfile.TemporaryDirectory(prefix="pitcrew-model-") as directory, tempfile.TemporaryFile() as output:
+    with tempfile.TemporaryDirectory(prefix="aegis-model-") as directory, tempfile.TemporaryFile() as output:
         with subprocess.Popen([executable, *options], cwd=directory, env=environment, stdin=subprocess.PIPE,
                               stdout=output, stderr=subprocess.DEVNULL, start_new_session=True) as process:
             try:
@@ -68,7 +68,7 @@ def complete_with_cli(settings, persona, data, timeout):
                    "vendor_estimate", result.get("session_id"))
     if status or result.get("is_error"):
         budget_reached = result.get("subtype") == "error_max_budget_usd"
-        message = ("Claude Code reached the remaining RaceDay budget. Update the budget before resuming."
+        message = ("Claude Code reached the remaining Project budget. Update the budget before resuming."
                    if budget_reached else f"{name} reported an unsuccessful request (exit {status})")
         raise MeteredModelError(message, tokens, budget_reached=budget_reached)
     return result.get("result"), tokens

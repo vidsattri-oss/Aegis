@@ -8,10 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from pitcrew.engine import Lead
-from pitcrew.extensions import Extensions, server_from
-from pitcrew.mcp_oauth import MCPOAuth, discover
-from pitcrew.store import Store
+from aegis.engine import Lead
+from aegis.extensions import Extensions, server_from
+from aegis.mcp_oauth import MCPOAuth, discover
+from aegis.store import Store
 
 
 class WorkspaceToolsTest(unittest.TestCase):
@@ -19,7 +19,7 @@ class WorkspaceToolsTest(unittest.TestCase):
         config = '[[mcp]]\nname = "example"\nurl = "https://example.org/mcp"\noauth = {client_id = "client"}\n[mcp.tools]\nsearch = ["research"]\n'
         files = {"SKILL.md": "---\nname: workshop\ndescription: Workshop guidance\n---\nUse the references.",
                  "references/checks.md": "Check the acceptance criteria.", "notes.txt": "Confirm readiness."}
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"PITCREW_PROVIDER": "demo"}, clear=True):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"AEGIS_PROVIDER": "demo"}, clear=True):
             with closing(Lead(Path(temp))) as lead:
                 lead.save_extensions({"text": config, "base": ""})
                 with self.assertRaisesRegex(ValueError, "configuration changed"):
@@ -65,9 +65,9 @@ class WorkspaceToolsTest(unittest.TestCase):
             self.assertEqual(challenge, authorization["code_challenge"][0])
             return {"access_token": "example-token", "token_type": "Bearer", "expires_in": 300}
 
-        with (patch("pitcrew.mcp_oauth.discover", return_value=(metadata, "")),
-              patch("pitcrew.mcp_oauth.socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 443))]),
-              patch("pitcrew.mcp_oauth.exchange", side_effect=redeem)):
+        with (patch("aegis.mcp_oauth.discover", return_value=(metadata, "")),
+              patch("aegis.mcp_oauth.socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 443))]),
+              patch("aegis.mcp_oauth.exchange", side_effect=redeem)):
             authorization = parse_qs(urlsplit(oauth.begin(server, callback)).query)
             self.assertEqual(authorization["redirect_uri"], [callback])
             self.assertEqual(authorization["scope"], ["read"])
@@ -82,7 +82,7 @@ class WorkspaceToolsTest(unittest.TestCase):
             self.assertFalse(oauth.connected(server))
 
     def test_oauth_rejects_unverified_issuer(self):
-        with patch("pitcrew.mcp_oauth.exchange", side_effect=[
+        with patch("aegis.mcp_oauth.exchange", side_effect=[
             'Bearer resource_metadata="https://mcp.example/metadata"',
             {"resource": "https://mcp.example/mcp", "authorization_servers": ["https://auth.example"]},
             {"issuer": "https://unexpected.example", "code_challenge_methods_supported": ["S256"]},

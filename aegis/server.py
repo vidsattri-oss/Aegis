@@ -19,13 +19,13 @@ from .contracts import PERSONAS, STAGES, require
 from .engine import Lead
 from .sandbox import detected_capacity
 
-WEB = files("pitcrew").joinpath("web")
+WEB = files("aegis").joinpath("web")
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           "/workspace-tools.js": ("workspace-tools.js", "text/javascript; charset=utf-8"),
           "/session.js": ("session.js", "text/javascript; charset=utf-8"),
           "/styles.css": ("styles.css", "text/css; charset=utf-8"),
-          "/pitcrew-mark.png": ("pitcrew-mark.png", "image/png"),
+          "/aegis-mark.png": ("aegis-mark.png", "image/png"),
           "/agent-portraits.png": ("agent-portraits.png", "image/png")}
 PROJECT = re.compile(r"/api/projects/([0-9a-f]{16})/sessions\Z")
 PROJECT_BUDGET = re.compile(r"/api/projects/([0-9a-f]{16})/budget\Z")
@@ -98,7 +98,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def dispatch(self):
         if not self.server.bound.acquire(blocking=False):
-            self.json({"error": "Workspace server is busy"}, 503)
+            self.json({"error": "Aegis server is busy"}, 503)
             return
         try:
             if self.headers.get("Host") not in (self.server.host_header, f"localhost:{self.server.server_port}"):
@@ -110,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
                         or self.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site")):
                     raise HTTPFailure(403, "Cross-origin requests are disabled")
             if self.command == "POST":
-                token = self.headers.get("X-Pitcrew-Token", self.headers.get("X-Omni-Token", ""))
+                token = self.headers.get("X-Aegis-Token", self.headers.get("X-Pitcrew-Token", self.headers.get("X-Omni-Token", "")))
                 if not secrets.compare_digest(token, self.server.csrf):
                     raise HTTPFailure(403, "Missing workspace request token")
             if self.command == "POST":
@@ -137,7 +137,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/workspace":
             self.json({"csrf": self.server.csrf, "workspace_id": lead.workspace, "projects": store.projects(),
                        "provider": lead.provider(), "memory": store.memory_health(),
-                       "capabilities": {"github_racedays": True, "raceday_budgets": True}})
+                       "capabilities": {"github_projects": True, "project_budgets": True,
+                                        "github_racedays": True, "raceday_budgets": True}})
         elif path == "/api/extensions":
             self.json(lead.extensions())
         elif path == "/api/extensions/config":
@@ -160,7 +161,7 @@ class Handler(BaseHTTPRequestHandler):
             self.json(store.dream_history(page) if path.endswith("/history") else store.memory_browser(search, page))
         elif path == "/api/memory/playbooks":
             project = query.get("project", [None])[0]
-            require(project is None or re.fullmatch(r"[0-9a-f]{16}", project), "Invalid RaceDay ID")
+            require(project is None or re.fullmatch(r"[0-9a-f]{16}", project), "Invalid Project ID")
             self.json({"playbooks": store.playbooks(project)})
         elif path == "/api/execution":
             self.json(lead.execution_settings())
@@ -177,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
         elif match := PROJECT.fullmatch(path):
             project = store.row("SELECT * FROM projects WHERE id=?", (match[1],))
             if not project:
-                raise HTTPFailure(404, "RaceDay does not exist")
+                raise HTTPFailure(404, "Project does not exist")
             self.json({"project": project, "budget": store.budget(match[1]), "sessions": store.rows(
                 """SELECT id,prompt,state,stage,branch,created,updated,error FROM sessions
                    WHERE project_id=? ORDER BY created DESC""", (match[1],))})
@@ -198,11 +199,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise HTTPFailure(404, "Build is not available")
                 bundle = lead.repo.bundles / f"{session_id}.zip"
                 self.send(200, bundle.read_bytes(), "application/zip",
-                          {"Content-Disposition": f'attachment; filename="pitcrew-{session_id}.zip"'})
+                          {"Content-Disposition": f'attachment; filename="aegis-{session_id}.zip"'})
             elif not action:
                 session = store.summary(session_id)
                 if not session:
-                    raise HTTPFailure(404, "Lap does not exist")
+                    raise HTTPFailure(404, "Session does not exist")
                 self.json(session)
             else:
                 raise HTTPFailure(404, "Unknown workspace endpoint")
@@ -319,7 +320,7 @@ def workspace_lock(directory):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise SystemExit("This Pit Crew Harness workspace is already open") from exc
+            raise SystemExit("This Aegis workspace is already open") from exc
         yield
 
 
@@ -335,7 +336,7 @@ def main(argv=None):
             Docker().doctor()
         except (OSError, RuntimeError, TimeoutError) as exc:
             parser.exit(1, f"{exc}\n")
-        print("Docker and Pit Crew Harness images are ready.")
+        print("Docker and Aegis images are ready.")
         return
     if not 0 <= args.port <= 65535:
         parser.error("Port must be between 0 and 65535")
@@ -351,7 +352,7 @@ def main(argv=None):
                 pending = marker.with_suffix(".tmp")
                 pending.write_text(str(server.server_port), encoding="ascii")
                 pending.replace(marker)
-                print("Pit Crew Harness workspace is available at " + server.base_url, flush=True)
+                print("Aegis workspace is available at " + server.base_url, flush=True)
                 try:
                     server.serve_forever()
                 except KeyboardInterrupt:

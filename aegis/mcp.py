@@ -29,7 +29,7 @@ class Stdio:
     def __init__(self, config, credentials, docker=None, workspace=None, resources=None):
         sandboxed = config.get("isolation") != "host"
         self.docker = (docker or Docker()) if sandboxed else None
-        self.container = "pitcrew-mcp-" + secrets.token_hex(8) if sandboxed else None
+        self.container = "aegis-mcp-" + secrets.token_hex(8) if sandboxed else None
         if sandboxed:
             args = self.docker.args(self.container, workspace or self.container, "mcp", source=config["cwd"],
                                     resources=resources, caches=False)
@@ -195,7 +195,7 @@ class Client:
 
     def initialize(self, deadline):
         result = self.exchange("initialize", {"protocolVersion": VERSION, "capabilities": {},
-                                             "clientInfo": {"name": "Pit Crew Harness", "version": "0.1.0"}}, deadline)
+                                             "clientInfo": {"name": "Aegis", "version": "0.1.0"}}, deadline)
         version = result.get("protocolVersion")
         require(version in VERSIONS, "MCP server selected an unsupported protocol version")
         if isinstance(self.transport, StreamableHTTP):

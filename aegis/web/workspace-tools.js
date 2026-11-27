@@ -5,7 +5,7 @@ const skillAPI = "/api/extensions/skill";
 
 function showExtensions() {
   const content = node("div", { class: "fields" }, muted("Loading toolbox…"));
-  openDialog("Toolbox", content, true);
+  openDialog("Skills & Tools", content, true);
 
   const render = async (check = false) => {
     const controls = actions(button("Edit configuration", editExtensionConfig, "primary"),
@@ -58,8 +58,8 @@ function editExtensionConfig(event) {
         current.writable && button("Insert OAuth example", () => {
           editor.value = editor.value.trimEnd() + (editor.value.trim() ? "\n\n" : "") + example;
           editor.focus();
-        }, "quiet"), button("Back to Toolbox", showExtensions, "quiet")));
-    if (!current.writable) form.append(muted("This workspace loads its configuration from PITCREW_EXTENSIONS."));
+        }, "quiet"), button("Back to Skills & Tools", showExtensions, "quiet")));
+    if (!current.writable) form.append(muted("This workspace loads its configuration from AEGIS_EXTENSIONS."));
     form.addEventListener("submit", (change) => {
       change.preventDefault();
       perform(async () => {
@@ -114,7 +114,7 @@ function editSkill(original = null) {
       field("File to edit", picker), field("File contents", editor),
       node("fieldset", { class: "skill-grants" }, node("legend", {}, "Agent roles"), grants.map(({ field }) => field)),
       actions(node("button", { class: "button primary", type: "submit" }, "Save Skill"),
-        button("Back to Toolbox", showExtensions, "quiet")));
+        button("Back to Skills & Tools", showExtensions, "quiet")));
     form.addEventListener("submit", (change) => {
       change.preventDefault();
       perform(async () => {
@@ -162,9 +162,9 @@ function showDreaming() {
       node("summary", {}, (names[item.role] || item.role) + " · " + item.name, " · ", muted("Revision " + item.revision)),
       list(item.lessons.map((lesson) => node("div", {}, lesson.lesson, node("p", { class: "muted" }, lesson.evidence))))));
     playbooks.replaceChildren(...entries.length ? entries :
-      [muted("Playbooks appear after the crew has approved work and consolidated its notes.")]);
+      [muted("Playbooks appear after the agents has approved work and consolidated its notes.")]);
   };
-  const searchForm = node("form", { class: "fields" }, field("Search crew notes", search),
+  const searchForm = node("form", { class: "fields" }, field("Search session notes", search),
     actions(node("button", { type: "submit", class: "button quiet" }, "Search")));
   searchForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -172,14 +172,14 @@ function showDreaming() {
     recordPage = 0;
     perform(loadRecords, { currentTarget: event.submitter });
   });
-  openDialog("Setup Book", node("div", { class: "fields" },
+  openDialog("Memory", node("div", { class: "fields" },
     sectionHeading("Consolidation history", button("Consolidate notes", (event) => perform(async () => {
       await api("/api/memory/dream", {});
       historyPage = recordPage = 0;
       await Promise.all([loadHistory(), loadRecords(), loadPlaybooks(), refresh(true)]);
     }, event), "primary")),
-    muted("The crew consolidates decisions and fixes between laps."), history,
+    muted("Aegis consolidates decisions and fixes between sessions."), history,
     node("h3", {}, "Agent playbooks"), playbooks,
-    node("h3", {}, "Crew notes"), searchForm, records), true);
+    node("h3", {}, "Session notes"), searchForm, records), true);
   perform(() => Promise.all([loadHistory(), loadRecords(), loadPlaybooks()]));
 }

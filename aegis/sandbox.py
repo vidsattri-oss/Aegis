@@ -21,7 +21,7 @@ from .contracts import MAX_BUILD_WORKERS, PROFILES, require
 from .preflight import CACHES
 from .role_tools import FRAME_LIMIT, ROLE_TOOLS
 
-IMAGE_PREFIX = "pitcrew"
+IMAGE_PREFIX = "aegis"
 TASK_PROFILES = {**PROFILES, "build": ("runtime", 1, 512, 128),
                  "qa_browser": ("qa", 2, 1536, 256), "qa_artifact": ("runtime", 1, 512, 128),
                  "release": ("runtime", 1, 512, 128), "preview": ("runtime", 1, 512, 128),
@@ -89,7 +89,7 @@ def execution_plan(policy, capacity):
     return {**policy, "capacity": capacity, "limits": limits}
 
 
-def adaptive_lap_limit(plan, pressure):
+def adaptive_session_limit(plan, pressure):
     if not plan["adaptive_sessions"]:
         return plan["sessions"]
     if not plan["capacity"] or pressure["external"] is None:
@@ -122,7 +122,7 @@ def profile(task, policy=None):
             "tools": [ROLE_TOOLS[task][0]] if task in ROLE_TOOLS else []}
 
 
-def lap_profile(task, policy, plan, attempt=1):
+def session_profile(task, policy, plan, attempt=1):
     resources = profile(task, policy)
     if attempt == 1 and plan.get("sandbox_sizes", {}).get(task) == "compact":
         # Operator-pinned values take precedence over model-selected sizing.
@@ -323,7 +323,7 @@ class Docker:
         return {"containers": count, "cpu": round(cpu, 3), "ram": math.ceil(ram)}
 
     def probe_mounts(self, directory):
-        name = "pitcrew-probe-" + secrets.token_hex(8)
+        name = "aegis-probe-" + secrets.token_hex(8)
         targets = [target for variable, target in CACHES.values() if environment(variable)]
         source = "from pathlib import Path\nimport sys\nassert Path('/input/probe').read_text() == sys.argv[1]\n"
         source += "for path in sys.argv[2:]:\n    next(Path(path).iterdir(), None)\n"

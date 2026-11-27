@@ -8,25 +8,25 @@ PREFIX ?= $(HOME)/.local
 all: build images
 
 build: check
-	$(PYTHON) -m pitcrew.build
+	$(PYTHON) -m aegis.build
 
 install: build
 	install -d "$(DESTDIR)$(PREFIX)/bin"
 	@set -eu; \
-	  target="$(DESTDIR)$(PREFIX)/bin/pitcrew"; \
+	  target="$(DESTDIR)$(PREFIX)/bin/aegis"; \
 	  test ! -d "$$target"; \
 	  tmp=$$(mktemp "$$target.XXXXXX"); \
 	  trap 'rm -f "$$tmp"' EXIT; \
-	  install -m 0755 dist/pitcrew "$$tmp"; \
+	  install -m 0755 dist/aegis "$$tmp"; \
 	  mv -f "$$tmp" "$$target"; \
 	  printf 'Installed %s\n' "$$target"
 
 check:
-	$(PYTHON) -m compileall -q pitcrew omni containers tests
-	$(NODE) --check pitcrew/web/app.js
-	$(NODE) --check pitcrew/web/workspace-tools.js
-	$(NODE) --check pitcrew/web/session.js
-	$(NODE) --check pitcrew/sample/app.js
+	$(PYTHON) -m compileall -q aegis pitcrew omni containers tests
+	$(NODE) --check aegis/web/app.js
+	$(NODE) --check aegis/web/workspace-tools.js
+	$(NODE) --check aegis/web/session.js
+	$(NODE) --check aegis/sample/app.js
 
 test: check
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
@@ -40,13 +40,13 @@ coverage: check
 images: image-worker image-qa image-runtime
 
 image-worker image-qa image-runtime: image-%:
-	$(DOCKER) build --file containers/Dockerfile --target $* --tag pitcrew-$*:local .
+	$(DOCKER) build --file containers/Dockerfile --target $* --tag aegis-$*:local .
 
 run:
-	$(PYTHON) -m pitcrew serve
+	$(PYTHON) -m aegis serve
 
 doctor:
-	$(PYTHON) -m pitcrew --doctor
+	$(PYTHON) -m aegis --doctor
 
 smoke:
 	$(PYTHON) tests/smoke.py

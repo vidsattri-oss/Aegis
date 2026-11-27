@@ -2,7 +2,7 @@
 !containers
 !containers/Dockerfile
 !containers/*.py
-!pitcrew
-!pitcrew/__init__.py
-!pitcrew/contracts.py
-!pitcrew/role_tools.py
+!aegis
+!aegis/__init__.py
+!aegis/contracts.py
+!aegis/role_tools.py

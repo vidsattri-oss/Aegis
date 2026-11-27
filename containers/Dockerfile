@@ -2,7 +2,7 @@
 FROM node:24-bookworm-slim AS node
 FROM python:3.12-slim-bookworm AS worker
 WORKDIR /opt/harness
-COPY pitcrew/__init__.py pitcrew/contracts.py pitcrew/role_tools.py ./pitcrew/
+COPY aegis/__init__.py aegis/contracts.py aegis/role_tools.py ./aegis/
 COPY containers/role.py .
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp
 USER 10001:10001
@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 pyth
     && ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && node --version \
     && pip install --no-cache-dir playwright==1.64.1
-COPY pitcrew/__init__.py pitcrew/contracts.py pitcrew/role_tools.py ./pitcrew/
+COPY aegis/__init__.py aegis/contracts.py aegis/role_tools.py ./aegis/
 COPY containers/role.py containers/runtime.py .
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp
 USER 10001:10001

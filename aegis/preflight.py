@@ -3,7 +3,7 @@ import http.client
 
 from .config import environment
 
-CACHES = {"PyPI": ("PITCREW_WHEELHOUSE", "/wheels"), "npm": ("PITCREW_NPM_CACHE", "/npm-input")}
+CACHES = {"PyPI": ("AEGIS_WHEELHOUSE", "/wheels"), "npm": ("AEGIS_NPM_CACHE", "/npm-input")}
 
 
 def check_workspace(docker, store, provider_check=None):

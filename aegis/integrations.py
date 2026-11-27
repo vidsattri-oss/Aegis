@@ -68,7 +68,7 @@ def request(url, *, payload=None, headers=None, timeout=30, limit=MAX_BYTES * 2,
     try:
         conn.connect()
         conn.request("GET" if body is None else "POST", target, body=body,
-                     headers={"Accept-Encoding": "identity", "User-Agent": "PitCrewHarness/0.1",
+                     headers={"Accept-Encoding": "identity", "User-Agent": "Aegis/0.1",
                               **({"Content-Type": "application/json"} if body is not None else {}),
                               **(headers or {})})
         sock = conn.sock
@@ -375,7 +375,7 @@ def advisories(deps, timeout):
 
 
 def environment_provider():
-    return environment("PITCREW_PROVIDER") or ("azure-gateway" if os.environ.get("AI_GATEWAY_CHAT_URL") else None)
+    return environment("AEGIS_PROVIDER") or ("azure-gateway" if os.environ.get("AI_GATEWAY_CHAT_URL") else None)
 
 
 def provider_key(kind):
@@ -383,12 +383,12 @@ def provider_key(kind):
         return ""
     if kind == "azure-gateway" and (key := os.environ.get("AI_GATEWAY_API_KEY")):
         return key
-    return environment("PITCREW_API_KEY", "")
+    return environment("AEGIS_API_KEY", "")
 
 
 def initial_provider(*, require_model=True):
     kind = environment_provider() or "demo"
-    endpoint, model = environment("PITCREW_ENDPOINT"), environment("PITCREW_MODEL")
+    endpoint, model = environment("AEGIS_ENDPOINT"), environment("AEGIS_MODEL")
     if kind == "azure-gateway":
         endpoint = endpoint or os.environ.get("AI_GATEWAY_CHAT_URL")
         model = model or os.environ.get("AI_GATEWAY_MODEL")
